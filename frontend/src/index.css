@@ -1,0 +1,20 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+@theme {
+  --font-sans: "Atkinson Hyperlegible", system-ui, sans-serif;
+  --font-display: "Bricolage Grotesque", system-ui, sans-serif;
+  --color-ink: #1e1b4b;
+  --color-accent: #f59e0b;
+}
+body { @apply bg-slate-50 text-slate-800 dark:bg-slate-950 dark:text-slate-100 font-sans; }
+.glass { @apply bg-white/70 dark:bg-slate-900/60 backdrop-blur border border-slate-200 dark:border-slate-800 rounded-2xl; }
+.btn { @apply rounded-xl px-4 py-2 font-bold bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-40 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-indigo-400; }
+.btn-ghost { @apply rounded-xl px-3 py-2 border border-slate-300 dark:border-slate-700 hover:bg-slate-100 dark:hover:bg-slate-800 focus-visible:outline-2 focus-visible:outline-indigo-400; }
+@media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+@media print {
+  html, body, * { background: transparent !important; color: #000 !important; box-shadow: none !important; backdrop-filter: none !important; }
+  header, .fixed { display: none !important; }
+  .glass, .board { border: 1px solid #999 !important; break-inside: avoid; }
+  main { max-width: 100% !important; padding: 0 !important; }
+}
