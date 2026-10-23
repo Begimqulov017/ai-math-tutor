@@ -2,18 +2,21 @@
 import json
 import logging
 import re
+import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 import config
 import db
 from llm import balancer, gemini, parse_json
 from prompts import DEMO, LANGS, SCHEMA
-from security import hash_password, make_token, optional_user_id, rate_limit, required_user_id, verify_password
+from security import (client_ip, hash_password, ip_bucket, ip_hash, is_loopback, make_token, optional_user_id, rate_limit,
+                      required_user_id, verify_password)
 
 log = logging.getLogger("mathtutor")
 Lang = Literal["uz", "ru", "en"]
@@ -32,7 +35,27 @@ async def lifespan(_: FastAPI):
 
 
 app = FastAPI(title="AI Math Tutor API", lifespan=lifespan)
-app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+
+
+@app.middleware("http")
+async def catch_unhandled_errors(request: Request, call_next):
+    """An unhandled exception (e.g. the database is unreachable) would otherwise bypass CORSMiddleware and the browser
+    would only show "Network error". Registered BEFORE CORSMiddleware so CORS wraps the JSON error answer."""
+    try:
+        return await call_next(request)
+    except Exception:
+        log.exception("unhandled error on %s %s", request.method, request.url.path)
+        return JSONResponse({"detail": "Server error, please try again in a moment"}, status_code=500)
+
+
+# CORS is open to every origin (login uses a Bearer token, not cookies, so credentials stay off)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # ---------------- models ----------------
@@ -104,10 +127,39 @@ def norm_answer(s: str) -> str:
     return ",".join(sorted(x for x in re.split(r"[,;]", re.sub(r"\s+", "", str(s).lower())) if x))
 
 
-# ---------------- health ----------------
+# ---------------- health / diagnostics ----------------
 @app.get("/api/health")
 def health():
-    return {"status": "ok", "active_keys": balancer.active(), "db": db.BACKEND}  # no DB query: pings must not wake the database
+    # no DB query on purpose: uptime pings must not keep a free Neon database awake
+    return {"status": "ok", "active_keys": balancer.active(), "db": db.BACKEND}
+
+
+@app.get("/api/health/db")
+def health_db():
+    t0 = time.time()
+    try:
+        db.ping()
+    except Exception as e:
+        log.warning("db health check failed: %s", e.__class__.__name__)
+        return JSONResponse({"status": "down", "db": db.BACKEND}, status_code=503)
+    return {"status": "ok", "db": db.BACKEND, "ms": round((time.time() - t0) * 1000)}
+
+
+@app.get("/api/ip-check")
+def ip_check(request: Request):
+    """Shows which IP the server sees for YOU - use it to verify CLIENT_IP_HEADER / TRUSTED_PROXY_HOPS."""
+    ip = client_ip(request)
+    return {"ip": ip, "counted_as": ip_bucket(ip), "x_forwarded_for": request.headers.get("x-forwarded-for"),
+            "header_used": config.CLIENT_IP_HEADER or None, "hops": config.TRUSTED_PROXY_HOPS,
+            "limit_applies": config.GUEST_PROBLEM_LIMIT > 0 and not is_loopback(ip)}
+
+
+@app.get("/api/guest-status")
+def guest_status(request: Request, uid: int | None = Depends(optional_user_id)):
+    ip = client_ip(request)
+    if uid or config.GUEST_PROBLEM_LIMIT <= 0 or is_loopback(ip):
+        return {"used": 0, "limit": 0}
+    return {"used": db.guest_used(ip_hash(ip), config.GUEST_WINDOW_HOURS), "limit": config.GUEST_PROBLEM_LIMIT}
 
 
 # ---------------- auth ----------------
@@ -159,21 +211,38 @@ async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(o
     if not body.text.strip() and not body.image_base64:
         raise HTTPException(400, "Provide text or an image")
     rate_limit(request, "llm", 20)
+    guest = None
     if not balancer.total:
         key, data, cached = "demo", DEMO, True
     else:
         key = db.cache_key(body.text, body.lang, body.image_base64)
-        data = db.cache_get(key)  # cache hit: no AI call at all
-        cached = data is not None
-        if data is None:
-            system = f"You are an expert math tutor. Write all explanations in {LANGS[body.lang]}. " + SCHEMA
-            parts = []
-            if body.image_base64:
-                parts.append({"inline_data": {"mime_type": body.image_mime, "data": body.image_base64}})
-            parts.append({"text": body.text or "Solve the problem shown in the image."})
-            data = clean_analysis(parse_json(await gemini(parts, system, as_json=True)))
-            db.cache_put(key, body.lang, data)
+        ipk, newly = None, False
+        ip = client_ip(request)
+        if uid is None and config.GUEST_PROBLEM_LIMIT > 0 and not is_loopback(ip):
+            # strict limit: a guest may open at most N different problems per IP (the same problem again is free)
+            ipk = ip_hash(ip)
+            allowed, newly, used = db.guest_reserve(ipk, key, config.GUEST_PROBLEM_LIMIT, config.GUEST_WINDOW_HOURS)
+            if not allowed:
+                raise HTTPException(403, "guest_limit")
+            guest = {"used": used, "limit": config.GUEST_PROBLEM_LIMIT}
+        try:
+            data = db.cache_get(key)  # cache hit: no AI call at all
+            cached = data is not None
+            if data is None:
+                system = f"You are an expert math tutor. Write all explanations in {LANGS[body.lang]}. " + SCHEMA
+                parts = []
+                if body.image_base64:
+                    parts.append({"inline_data": {"mime_type": body.image_mime, "data": body.image_base64}})
+                parts.append({"text": body.text or "Solve the problem shown in the image."})
+                data = clean_analysis(parse_json(await gemini(parts, system, as_json=True)))
+                db.cache_put(key, body.lang, data)
+        except BaseException:
+            if ipk and newly:  # the AI failed: an error must not cost the guest a problem
+                db.guest_release(ipk, key)
+            raise
     out = {**public_view(data), "key": key, "cached": cached}
+    if guest:
+        out["guest"] = guest
     if key == "demo":
         out["demo"] = True
     elif uid:

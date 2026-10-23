@@ -1,4 +1,7 @@
 """Password hashing (bcrypt), JWT, auth dependencies and a small in-memory rate limiter."""
+import hashlib
+import hmac
+import ipaddress
 import time
 from collections import defaultdict, deque
 
@@ -51,7 +54,7 @@ _hits: dict = defaultdict(deque)
 
 
 def rate_limit(request: Request, bucket: str, limit: int, window: int = 60) -> None:
-    ip = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (request.client.host if request.client else "?")
+    ip = client_ip(request)
     q, now = _hits[(bucket, ip)], time.time()
     while q and q[0] < now - window:
         q.popleft()
@@ -60,3 +63,44 @@ def rate_limit(request: Request, bucket: str, limit: int, window: int = 60) -> N
     q.append(now)
     if len(_hits) > 20000:  # keep memory bounded
         _hits.clear()
+
+
+# ---------------- visitor IP (for the guest limit) ----------------
+def _valid_ip(value: str):
+    try:
+        return ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+
+
+def client_ip(request: Request) -> str:
+    """The visitor's IP. X-Forwarded-For can be forged by the visitor on the LEFT, so we only trust what our own
+    proxy added on the RIGHT (TRUSTED_PROXY_HOPS), or a header the edge overwrites (CLIENT_IP_HEADER)."""
+    if config.CLIENT_IP_HEADER:
+        ip = _valid_ip(request.headers.get(config.CLIENT_IP_HEADER, ""))
+        if ip:
+            return str(ip)
+    parts = [x.strip() for x in request.headers.get("x-forwarded-for", "").split(",") if x.strip()]
+    if parts:
+        ip = _valid_ip(parts[-config.TRUSTED_PROXY_HOPS] if len(parts) >= config.TRUSTED_PROXY_HOPS else parts[0])
+        if ip:
+            return str(ip)
+    return request.client.host if request.client else "0.0.0.0"
+
+
+def ip_bucket(ip: str) -> str:
+    """IPv6 users own a whole /64: group it, otherwise one person has billions of 'different' addresses."""
+    a = _valid_ip(ip)
+    if a is not None and a.version == 6:
+        return str(ipaddress.ip_network(f"{a}/64", strict=False).network_address) + "/64"
+    return ip
+
+
+def is_loopback(ip: str) -> bool:
+    a = _valid_ip(ip)
+    return bool(a and a.is_loopback)
+
+
+def ip_hash(ip: str) -> str:
+    """Only a keyed hash of the IP is stored in the database."""
+    return hmac.new(config.JWT_SECRET.encode(), ip_bucket(ip).encode(), hashlib.sha256).hexdigest()

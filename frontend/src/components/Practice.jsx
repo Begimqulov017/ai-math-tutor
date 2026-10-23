@@ -35,7 +35,7 @@ export default function Practice({ lang, practice = {}, dataKey, voiceOn, speak,
       scored.current.add(k)
       onResult?.({ ok: r.correct, level, index: i, q: q.q, userAnswer: val, user: r.user, xpGained: r.xp_gained, firstWrong })
       if (voiceOn) speak(r.correct ? t.ok : t.no)
-    } catch (e) { setMsg(e.status === 410 ? t.expired : e.status === 429 ? t.busy : t.err) }
+    } catch (e) { setMsg(e.status === 0 ? t.net : e.status === 410 ? t.expired : e.status === 429 ? t.busy : t.err) }
     setBusy(false)
   }
   return (

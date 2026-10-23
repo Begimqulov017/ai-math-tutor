@@ -1,5 +1,13 @@
-.env
-data.db
 .venv/
-node_modules/
+venv/
 __pycache__/
+*.pyc
+.env
+.env.*
+!.env.example
+node_modules/
+dist/
+*.db
+*.db-wal
+*.db-shm
+.DS_Store

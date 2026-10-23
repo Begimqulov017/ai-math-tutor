@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { T } from './lib/i18n'
-import { analyzeProblem, getMe, getSync, login, putSync, register } from './lib/api'
+import { analyzeProblem, getGuestStatus, getMe, getSync, login, putSync, register, warmUp } from './lib/api'
 import { useVoice } from './lib/useVoice'
 import {
   clearAuth, clearData, loadAuth, loadHistory, loadMistakes, mergeData,
@@ -39,12 +39,20 @@ export default function App() {
   const [panel, setPanel] = useState(null) // 'history' | 'progress' | 'auth'
   const [authMode, setAuthMode] = useState('login')
   const [gain, setGain] = useState(null)
+  const [guest, setGuest] = useState(null) // { used, limit } for guests
   const user = auth?.user || null
   const t = T[lang]
   const { speak, listen, stop } = useVoice(lang)
+  const errText = (e) => (e.status === 0 ? t.net : e.message === 'guest_limit' ? t.guestLimit
+    : e.status === 429 || e.status === 503 ? t.busy : t.err + ': ' + String(e.message).slice(0, 200))
 
   useEffect(() => { document.documentElement.classList.toggle('dark', dark) }, [dark])
   useEffect(() => { document.documentElement.lang = lang }, [lang])
+  useEffect(() => { warmUp() }, []) // wake a sleeping free server while the user is still reading the page
+  useEffect(() => {
+    if (user) setGuest(null)
+    else getGuestStatus().then(setGuest).catch(() => {})
+  }, [user?.id]) // eslint-disable-line
 
   const updHistory = (fn) => setHistory((h) => { const n = fn(h); saveHistory(n); return n })
   const updMistakes = (fn) => setMistakes((m) => { const n = fn(m); saveMistakes(n); return n })
@@ -77,10 +85,11 @@ export default function App() {
   }, [history, mistakes, auth, synced]) // eslint-disable-line
 
   const handleAuth = async (mode, name, email, password) => {
-    const r = await (mode === 'login' ? login({ email, password }) : register({ name, email, password }))
+    let r
+    try { r = await (mode === 'login' ? login({ email, password }) : register({ name, email, password })) } catch (e) { throw new Error(errText(e)) }
     const a = { token: r.token, user: r.user }
     saveAuth(a); setAuth(a)
-    try { await pull() } catch (e) { clearAuth(); setAuth(null); throw e }
+    try { await pull() } catch (e) { clearAuth(); setAuth(null); throw new Error(errText(e)) }
     setPanel(null)
   }
   const logout = async () => {
@@ -97,7 +106,7 @@ export default function App() {
   const submit = async (img) => {
     setLoading(true); setError('')
     try {
-      const { progress, ...view } = await analyzeProblem({ text, lang, image_base64: img?.data ?? null, image_mime: img?.mime ?? 'image/png' })
+      const { progress, guest: g, ...view } = await analyzeProblem({ text, lang, image_base64: img?.data ?? null, image_mime: img?.mime ?? 'image/png' })
       setData(view); setStep(0); setMsgs([])
       if (view.demo) setActiveId(null)
       else {
@@ -105,9 +114,14 @@ export default function App() {
         setActiveId(id)
         updHistory((h) => [{ id, ts: id, text, data: view, chat: [] }, ...h])
       }
+      if (g) setGuest(g)
       if (progress) { applyUser(progress.user); showGain(progress.xp_gained) }
     } catch (e) {
-      setError(e.status === 429 || e.status === 503 ? t.busy : t.err + ': ' + String(e.message).slice(0, 200))
+      if (e.message === 'guest_limit') { // the server says: this IP used all its free problems
+        setGuest((x) => ({ limit: x?.limit || 3, used: x?.limit || 3 }))
+        openAuth('register')
+      }
+      setError(errText(e))
     }
     setLoading(false)
   }
@@ -158,7 +172,14 @@ export default function App() {
         {!user && (
           <div className="print:hidden glass mt-4 px-4 py-3 flex flex-wrap items-center gap-3 !border-indigo-300 dark:!border-indigo-800">
             <span className="text-xl" aria-hidden="true">🔒</span>
-            <p className="flex-1 min-w-56 text-sm">{t.guestNote}</p>
+            <p className="flex-1 min-w-56 text-sm">
+              {t.guestNote}
+              {guest?.limit > 0 && (
+                <span className={`block font-bold mt-0.5 ${guest.used >= guest.limit ? 'text-rose-600' : 'text-indigo-600 dark:text-indigo-300'}`}>
+                  {t.guestCount.replace('{u}', guest.used).replace('{l}', guest.limit)}
+                </span>
+              )}
+            </p>
             <button className="btn text-sm" onClick={() => openAuth('register')}>{t.reg}</button>
             <button className="btn-ghost text-sm" onClick={() => openAuth('login')}>{t.login}</button>
           </div>
