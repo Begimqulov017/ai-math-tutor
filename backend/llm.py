@@ -53,12 +53,12 @@ class APIKeyBalancer:
 balancer = APIKeyBalancer()
 
 
-async def gemini(parts: list, system: str, as_json: bool) -> str:
+async def gemini(parts: list, system: str, as_json: bool, history: list | None = None) -> str:
     if not balancer.total:
         raise HTTPException(503, "AI service is not configured")
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [{"role": "user", "parts": parts}],
+        "contents": [*(history or []), {"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.3, **({"responseMimeType": "application/json"} if as_json else {})},
     }
     async with httpx.AsyncClient(timeout=120) as client:

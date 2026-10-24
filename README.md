@@ -28,6 +28,9 @@ npm run dev            # http://localhost:5173  (API manzili: VITE_API_URL, stan
 | `GEMINI_MODEL` | Model nomi |
 | `JWT_SECRET` | **Serverda majburiy.** Uzun tasodifiy matn (mehmon cheklovi ham shunga bog'liq) |
 | `DATABASE_URL` | PostgreSQL havolasi (serverda). Lokal kompyuterda bo'sh |
+| `DAILY_TOKENS` | Har bir login qilgan foydalanuvchiga kuniga nechta masala (standart 50) |
+| `ADMIN_PASSWORD` | Admin panel paroli: **aynan 16 ta raqam**. Faqat serverning o'zgaruvchilarida (Render → Environment) yoki lokal `.env` da turadi. Bo'sh bo'lsa admin panel butunlay o'chiq |
+| `ADMIN_TOKEN_HOURS` | Admin seansi necha soat amal qiladi (standart 2) |
 | `GUEST_PROBLEM_LIMIT` | Mehmon (login qilmagan) uchun bitta IP'dan nechta **turli** misol. Standart 3, `0` = cheklovsiz |
 | `GUEST_WINDOW_HOURS` | `0` = cheklov hech qachon tiklanmaydi; `24` = 24 soatdan keyin tiklanadi |
 | `CLIENT_IP_HEADER`, `TRUSTED_PROXY_HOPS` | Haqiqiy IP'ni topish (pastga qarang) |
@@ -79,3 +82,27 @@ Environment: `VITE_API_URL=https://<backend-nomi>.onrender.com`.
   Ko'p loyiha/akkauntni kvotani aylanib o'tish uchun ishlatish cheklanishga olib kelishi mumkin. Eng ishonchlisi: billing + spend cap.
 - Bepul tarifda so'rov/javoblar Google tomonidan ko'rib chiqilishi va o'qitishda ishlatilishi mumkin.
 - Mashq javoblari serverda saqlanadi, XP faqat serverda hisoblanadi va har savol uchun bir marta beriladi.
+
+## Tokenlar (kuniga 50 ta)
+- Har bir login qilgan foydalanuvchi kuniga `DAILY_TOKENS` (50) ta masala yecha oladi. Hisob Toshkent vaqti bo'yicha yarim tunda yangilanadi.
+- 1 ta masala = 1 token. **Shu masalani o'sha kuni qayta ochish bepul.** AI xato bersa token qaytariladi.
+- Tokenlar tugasa, `/api/analyze-problem` `403` qaytaradi: `{"code": "tokens_exhausted", "message": "Daily tokens exhausted..."}`.
+- Yangilanishda tokenlar 50 gacha **to'ldiriladi** (`max(joriy, 50)`): admin bergan ortiqcha tokenlar yo'qolmaydi.
+- Eski bazalar uchun ustunlar (`tokens_remaining`, `last_token_reset`) server ishga tushganda o'zi qo'shiladi (`db.migrate()`, qayta-qayta ishlatish xavfsiz).
+
+## Admin panel
+- Kirish: sahifa pastidagi kichik ⚙ tugmasi yoki `https://<sayt>/#admin`.
+- Parol serverda tekshiriladi (kodda yoki repoda saqlanmaydi), 10 daqiqada 5 ta urinish bilan cheklangan. Muvaffaqiyatli kirishda 2 soatlik admin tokeni beriladi (xotirada turadi, sahifa yangilansa chiqib ketasiz).
+- Imkoniyatlar: foydalanuvchilar ro'yxati (email, ism, tokenlar, XP, streak, masalalar, to'g'ri/xato, oxirgi faollik), email bo'yicha qidiruv, istalgan foydalanuvchiga token qo'shish.
+
+## Suhbatlar (xotirali AI chat)
+- Login qilgan foydalanuvchi uchun har bir yechilgan masalaga **avtomatik alohida suhbat** ochiladi (`chat_threads`), xabarlar `chat_messages` da saqlanadi.
+- AI har javobda shu suhbatning mavzu xulosasini (masala, mavzu, yechim qadamlari) va oxirgi 20 ta xabarini oladi, shuning uchun nima haqida gaplashilganini eslab qoladi.
+- Chap paneldan yangi (erkin) suhbat ochish, almashish va o'chirish mumkin. Mehmonlar uchun chat vaqtinchalik (saqlanmaydi).
+
+## Testlar
+```bash
+cd backend
+python tests/test_features.py     # tokenlar, kunlik tiklanish, admin, suhbat xotirasi
+python tests/test_migration.py    # eski bazani yangilash
+```

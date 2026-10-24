@@ -15,8 +15,8 @@ import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import (Column, Float, Integer, MetaData, String, Table, Text, create_engine, delete, event, func,
-                        select, text, update)
+from sqlalchemy import (Column, Date, Float, ForeignKey, Integer, MetaData, String, Table, Text, create_engine, delete, event,
+                        func, inspect, select, text, update)
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError
@@ -97,6 +97,8 @@ users = Table(
     Column("problems", Integer, nullable=False, server_default="0"),
     Column("data", Text, nullable=False, server_default="{}"),
     Column("created", Float),
+    Column("tokens_remaining", Integer, nullable=False, server_default="50"),
+    Column("last_token_reset", Date),
 )
 awards = Table("awards", metadata, Column("user_id", Integer, primary_key=True), Column("key", String(255), primary_key=True))
 problem_cache = Table(
@@ -106,6 +108,24 @@ problem_cache = Table(
     Column("data", Text, nullable=False),
     Column("ts", Float),
     Column("hits", Integer, nullable=False, server_default="0"),
+)
+chat_threads = Table(
+    "chat_threads", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("title", String(200), nullable=False, server_default="New chat"),
+    Column("topic_summary", Text, nullable=False, server_default=""),
+    Column("problem_key", String(64)),  # the analysed problem this thread belongs to (one thread per problem)
+    Column("created_at", Float, nullable=False),
+    Column("updated_at", Float, nullable=False),
+)
+chat_messages = Table(
+    "chat_messages", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("thread_id", Integer, ForeignKey("chat_threads.id", ondelete="CASCADE"), nullable=False, index=True),
+    Column("role", String(10), nullable=False),  # 'user' | 'assistant'
+    Column("content", Text, nullable=False),
+    Column("created_at", Float, nullable=False),
 )
 guest_usage = Table(  # IP is stored only as a keyed hash
     "guest_usage", metadata,
@@ -130,6 +150,7 @@ def init() -> None:
     for attempt in range(5):
         try:
             metadata.create_all(engine)
+            migrate()
             log.info("Database ready: %s", "PostgreSQL" if IS_PG else "SQLite file " + config.DB_PATH)
             return
         except (OperationalError, InterfaceError) as e:
@@ -137,6 +158,28 @@ def init() -> None:
                 raise
             log.warning("database not reachable yet (%s), retrying", e.__class__.__name__)
             time.sleep(2 ** attempt)
+
+
+def migrate() -> None:
+    """create_all never alters an existing table, so columns added after the first release are added here.
+    Safe to run on every start (idempotent) and by several instances at once."""
+    have = {c["name"] for c in inspect(engine).get_columns("users")}
+    ine = "IF NOT EXISTS " if IS_PG else ""  # SQLite has no IF NOT EXISTS for columns: we check above instead
+    wanted = {
+        "tokens_remaining": f"ALTER TABLE users ADD COLUMN {ine}tokens_remaining INTEGER NOT NULL DEFAULT {config.DAILY_TOKENS}",
+        "last_token_reset": f"ALTER TABLE users ADD COLUMN {ine}last_token_reset DATE",
+    }
+    for name, sql in wanted.items():
+        if name in have:
+            continue
+        try:
+            with engine.begin() as c:
+                c.execute(text(sql))
+            log.info("migration: added users.%s", name)
+        except (OperationalError, InterfaceError):
+            raise
+        except Exception as e:  # another instance added it a moment ago
+            log.warning("migration of users.%s skipped: %s", name, e.__class__.__name__)
 
 
 @_retry
@@ -190,7 +233,7 @@ class EmailTaken(Exception):
 
 
 TZ = timezone(timedelta(hours=5))  # Uzbekistan (no daylight saving) - streak days follow local midnight
-_PUBLIC = ("id", "name", "email", "xp", "streak", "best_streak", "correct", "wrong", "problems")
+_PUBLIC = ("id", "name", "email", "xp", "streak", "best_streak", "correct", "wrong", "problems", "tokens_remaining")
 
 
 def _today() -> str:
@@ -201,15 +244,30 @@ def _yesterday() -> str:
     return (datetime.now(TZ).date() - timedelta(days=1)).isoformat()
 
 
+def _today_date():
+    return datetime.now(TZ).date()
+
+
+def _reset_if_new_day(c, u: dict) -> dict:
+    """New calendar day (Tashkent) since the last reset -> top the tokens up to DAILY_TOKENS.
+    Tokens granted by an admin above that amount are kept."""
+    today = _today_date()
+    if u.get("last_token_reset") != today:
+        tokens = max(u["tokens_remaining"], config.DAILY_TOKENS)
+        c.execute(update(users).where(users.c.id == u["id"]).values(tokens_remaining=tokens, last_token_reset=today))
+        return {**u, "tokens_remaining": tokens, "last_token_reset": today}
+    return u
+
+
 def public_user(r) -> dict:
-    return {k: r[k] for k in _PUBLIC}
+    return {**{k: r[k] for k in _PUBLIC}, "daily_tokens": config.DAILY_TOKENS}
 
 
 @_retry
 def get_user(uid: int):
     with conn() as c:
         r = c.execute(select(users).where(users.c.id == uid)).mappings().first()
-        return public_user(r) if r else None
+        return public_user(_reset_if_new_day(c, dict(r))) if r else None
 
 
 @_retry
@@ -237,6 +295,7 @@ def record_activity(uid: int, *, award_key: str | None = None, xp: int = 0, ok: 
         u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
         if not u:
             return 0, None
+        u = _reset_if_new_day(c, dict(u))
         today, streak = _today(), u["streak"]
         if u["last_day"] != today:
             streak = u["streak"] + 1 if u["last_day"] == _yesterday() else 1
@@ -305,3 +364,142 @@ def guest_used(ip_hash: str, window_hours: int = 0) -> int:
     with conn() as c:
         _guest_prepare(c, ip_hash, window_hours)
         return _guest_count(c, ip_hash)
+
+
+# ---------------- daily tokens ----------------
+@_retry
+def charge_token(uid: int, key: str):
+    """Take 1 token for analysing problem `key`. The same problem again on the same day is free.
+    Returns (allowed, tokens_left, newly_charged)."""
+    with conn() as c:
+        u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
+        if not u:
+            return False, 0, False
+        u = _reset_if_new_day(c, dict(u))
+        today = _today()
+        c.execute(delete(awards).where(awards.c.user_id == uid, awards.c.key.like("t:%"), awards.c.key < f"t:{today}"))  # old days
+        if c.execute(select(awards.c.key).where(awards.c.user_id == uid, awards.c.key == f"t:{today}:{key}")).first():
+            return True, u["tokens_remaining"], False
+        if u["tokens_remaining"] <= 0:
+            return False, 0, False
+        c.execute(_insert(awards).values(user_id=uid, key=f"t:{today}:{key}").on_conflict_do_nothing())
+        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=u["tokens_remaining"] - 1))
+        return True, u["tokens_remaining"] - 1, True
+
+
+@_retry
+def refund_token(uid: int, key: str) -> None:
+    """The AI failed: give the token back."""
+    with conn() as c:
+        if c.execute(delete(awards).where(awards.c.user_id == uid, awards.c.key == f"t:{_today()}:{key}")).rowcount:
+            c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=users.c.tokens_remaining + 1))
+
+
+# ---------------- admin ----------------
+def _like_escape(q: str) -> str:
+    return q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+@_retry
+def admin_list_users(q: str = "", limit: int = 50, offset: int = 0) -> dict:
+    with conn() as c:
+        stmt = select(users)
+        if q.strip():
+            stmt = stmt.where(func.lower(users.c.email).like("%" + _like_escape(q.strip()) + "%", escape="\\"))
+        total = c.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
+        rows = c.execute(stmt.order_by(users.c.id.desc()).limit(limit).offset(offset)).mappings().all()
+        today, out = _today_date(), []
+        for r in rows:
+            d = public_user({**r, "tokens_remaining": r["tokens_remaining"] if r["last_token_reset"] == today
+                             else max(r["tokens_remaining"], config.DAILY_TOKENS)})  # what the user would see now
+            d.update(last_active=r["last_day"] or None, created=r["created"])
+            out.append(d)
+        return {"total": total, "users": out}
+
+
+@_retry
+def admin_add_tokens(uid: int, amount: int):
+    with conn() as c:
+        u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
+        if not u:
+            return None
+        u = _reset_if_new_day(c, dict(u))
+        new = u["tokens_remaining"] + amount
+        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=new))
+        return public_user({**u, "tokens_remaining": new})
+
+
+# ---------------- chat threads / messages ----------------
+def _thread_public(r) -> dict:
+    return {k: r[k] for k in ("id", "title", "problem_key", "created_at", "updated_at")}
+
+
+@_retry
+def create_thread(uid: int, title: str, summary: str, problem_key: str | None = None) -> dict:
+    """One thread per analysed problem (asking again returns the existing one); problem_key=None = a free chat."""
+    with conn() as c:
+        if problem_key:
+            r = c.execute(select(chat_threads).where(chat_threads.c.user_id == uid, chat_threads.c.problem_key == problem_key)).mappings().first()
+            if r:
+                return _thread_public(r)
+        now = time.time()
+        vals = dict(user_id=uid, title=(title or "New chat")[:200], topic_summary=summary or "", problem_key=problem_key,
+                    created_at=now, updated_at=now)
+        vals["id"] = int(c.execute(chat_threads.insert().values(**vals)).inserted_primary_key[0])
+        return _thread_public(vals)
+
+
+@_retry
+def list_threads(uid: int) -> list:
+    with conn() as c:
+        rows = c.execute(select(chat_threads).where(chat_threads.c.user_id == uid).order_by(chat_threads.c.updated_at.desc()).limit(100)).mappings().all()
+        return [_thread_public(r) for r in rows]
+
+
+@_retry
+def get_thread(uid: int, tid: int):
+    """Only the owner gets the thread (includes the private topic_summary used as AI context)."""
+    with conn() as c:
+        r = c.execute(select(chat_threads).where(chat_threads.c.id == tid, chat_threads.c.user_id == uid)).mappings().first()
+        return dict(r) if r else None
+
+
+@_retry
+def delete_thread(uid: int, tid: int) -> bool:
+    with conn() as c:
+        if not c.execute(select(chat_threads.c.id).where(chat_threads.c.id == tid, chat_threads.c.user_id == uid)).first():
+            return False
+        c.execute(delete(chat_messages).where(chat_messages.c.thread_id == tid))  # SQLite does not enforce ON DELETE CASCADE
+        c.execute(delete(chat_threads).where(chat_threads.c.id == tid))
+        return True
+
+
+@_retry
+def add_messages(tid: int, pairs: list) -> list:
+    """Store several (role, content) messages of one exchange together."""
+    with conn() as c:
+        now, out = time.time(), []
+        for i, (role, content) in enumerate(pairs):
+            vals = dict(thread_id=tid, role=role, content=content, created_at=now + i * 0.001)
+            vals["id"] = int(c.execute(chat_messages.insert().values(**vals)).inserted_primary_key[0])
+            out.append({k: vals[k] for k in ("id", "role", "content", "created_at")})
+        c.execute(update(chat_threads).where(chat_threads.c.id == tid).values(updated_at=now))
+        return out
+
+
+@_retry
+def list_messages(tid: int, last: int | None = None) -> list:
+    """All messages oldest-first, or only the last `last` ones (the AI's short-term memory)."""
+    with conn() as c:
+        stmt = select(chat_messages).where(chat_messages.c.thread_id == tid)
+        if last:
+            rows = list(reversed(c.execute(stmt.order_by(chat_messages.c.id.desc()).limit(last)).mappings().all()))
+        else:
+            rows = c.execute(stmt.order_by(chat_messages.c.id).limit(1000)).mappings().all()
+        return [{k: r[k] for k in ("id", "role", "content", "created_at")} for r in rows]
+
+
+@_retry
+def rename_thread(tid: int, title: str) -> None:
+    with conn() as c:
+        c.execute(update(chat_threads).where(chat_threads.c.id == tid).values(title=title[:200]))

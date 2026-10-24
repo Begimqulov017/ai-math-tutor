@@ -1,4 +1,5 @@
 """AI Math Tutor API."""
+import hmac
 import json
 import logging
 import re
@@ -15,8 +16,8 @@ import config
 import db
 from llm import balancer, gemini, parse_json
 from prompts import DEMO, LANGS, SCHEMA
-from security import (client_ip, hash_password, ip_bucket, ip_hash, is_loopback, make_token, optional_user_id, rate_limit,
-                      required_user_id, verify_password)
+from security import (client_ip, hash_password, ip_bucket, ip_hash, is_loopback, make_admin_token, make_token, optional_user_id,
+                      rate_limit, require_admin, required_user_id, verify_password)
 
 log = logging.getLogger("mathtutor")
 Lang = Literal["uz", "ru", "en"]
@@ -88,6 +89,25 @@ class SolIn(BaseModel):
     lang: Lang = "uz"
 
 
+class ThreadIn(BaseModel):
+    title: str = Field("", max_length=200)
+    problem_key: str | None = Field(None, max_length=64)
+
+
+class MsgIn(BaseModel):
+    content: str = Field(min_length=1, max_length=2000)
+    lang: Lang = "uz"
+    context: dict = Field(default_factory=dict)  # what the student is looking at right now (current step), not stored
+
+
+class AdminLoginIn(BaseModel):
+    password: str = Field(max_length=64)
+
+
+class GrantIn(BaseModel):
+    amount: int = Field(ge=1, le=100_000)
+
+
 class RegisterIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     email: str = Field(max_length=120)
@@ -120,6 +140,32 @@ def public_view(d: dict) -> dict:
     """What the browser may see: practice answers stay on the server (XP can't be faked)."""
     out = dict(d)
     out["practice"] = {lv: [{k: v for k, v in it.items() if k != "answer"} for it in items] for lv, items in d["practice"].items()}
+    return out
+
+
+def plain_title(d: dict) -> str:
+    return re.sub(r"\s+", " ", str(d.get("problem", ""))).strip()[:120] or "Chat"
+
+
+def topic_summary(d: dict) -> str:
+    """The thread's permanent memory: the problem, its topic and the solution outline."""
+    t = d.get("topic") or {}
+    steps = "; ".join(str(x.get("latex", "")) for x in d.get("steps", [])[:8])
+    return (f"Problem: {d.get('problem', '')}\nTopic: {t.get('area', '')} / {t.get('topic', '')} / {t.get('method', '')}\n"
+            f"Core idea: {d.get('concept', '')}\nSolution steps (LaTeX): {steps}")[:3500]
+
+
+def history_to_contents(msgs: list) -> list:
+    """Stored messages -> Gemini turns (user/model alternate, first turn is the user's)."""
+    out: list = []
+    for m in msgs:
+        role = "user" if m["role"] == "user" else "model"
+        if out and out[-1]["role"] == role:
+            out[-1]["parts"][0]["text"] += "\n" + m["content"]
+        else:
+            out.append({"role": role, "parts": [{"text": m["content"]}]})
+    while out and out[0]["role"] != "user":
+        out.pop(0)
     return out
 
 
@@ -216,7 +262,7 @@ async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(o
         key, data, cached = "demo", DEMO, True
     else:
         key = db.cache_key(body.text, body.lang, body.image_base64)
-        ipk, newly = None, False
+        ipk, newly, charged = None, False, False
         ip = client_ip(request)
         if uid is None and config.GUEST_PROBLEM_LIMIT > 0 and not is_loopback(ip):
             # strict limit: a guest may open at most N different problems per IP (the same problem again is free)
@@ -225,6 +271,12 @@ async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(o
             if not allowed:
                 raise HTTPException(403, "guest_limit")
             guest = {"used": used, "limit": config.GUEST_PROBLEM_LIMIT}
+        elif uid is not None:
+            # daily tokens: 1 per problem (the same problem again on the same day is free)
+            ok, _left, charged = db.charge_token(uid, key)
+            if not ok:
+                raise HTTPException(403, {"code": "tokens_exhausted",
+                                          "message": "Daily tokens exhausted. They are renewed at midnight (Tashkent time)."})
         try:
             data = db.cache_get(key)  # cache hit: no AI call at all
             cached = data is not None
@@ -237,17 +289,23 @@ async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(o
                 data = clean_analysis(parse_json(await gemini(parts, system, as_json=True)))
                 db.cache_put(key, body.lang, data)
         except BaseException:
-            if ipk and newly:  # the AI failed: an error must not cost the guest a problem
+            if ipk and newly:  # the AI failed: an error must not cost a guest problem or a token
                 db.guest_release(ipk, key)
+            if uid is not None and charged:
+                db.refund_token(uid, key)
             raise
     out = {**public_view(data), "key": key, "cached": cached}
     if guest:
         out["guest"] = guest
     if key == "demo":
         out["demo"] = True
-    elif uid:
+    elif uid is not None:
         gained, user = db.record_activity(uid, award_key=f"a:{key}", xp=XP_ANALYZE, problem=True)
         out["progress"] = {"xp_gained": gained, "user": user}
+        try:  # every solved problem gets its own chat thread (one per problem)
+            out["thread_id"] = db.create_thread(uid, plain_title(data), topic_summary(data), key)["id"]
+        except Exception:
+            log.exception("could not create the chat thread")
     return out
 
 
@@ -301,3 +359,84 @@ async def check_solution(body: SolIn, request: Request):
               '"steps": [{"line": "short transcription of the student line", "ok": true, "note": "why it is right/wrong"}]}')
     parts = [{"inline_data": {"mime_type": body.image_mime, "data": body.image_base64}}, {"text": "Problem: " + body.problem}]
     return parse_json(await gemini(parts, system, True))
+
+
+# ---------------- admin panel ----------------
+@app.post("/api/admin/login")
+def admin_login(b: AdminLoginIn, request: Request):
+    rate_limit(request, "admin", 5, 600)  # brute force protection: 5 attempts / 10 minutes / IP
+    if not config.ADMIN_PASSWORD:
+        raise HTTPException(503, "The admin panel is disabled (ADMIN_PASSWORD is not set on the server)")
+    good = re.fullmatch(r"\d{16}", b.password) is not None and hmac.compare_digest(b.password.encode(), config.ADMIN_PASSWORD.encode())
+    if not good:
+        log.warning("failed admin login from %s", ip_bucket(client_ip(request)))
+        raise HTTPException(401, "Wrong password")
+    return {"token": make_admin_token(), "expires_hours": config.ADMIN_TOKEN_HOURS}
+
+
+@app.get("/api/admin/users", dependencies=[Depends(require_admin)])
+def admin_users(q: str = "", limit: int = 50, offset: int = 0):
+    return db.admin_list_users(q[:100], max(1, min(limit, 200)), max(0, offset))
+
+
+@app.post("/api/admin/users/{user_id}/tokens", dependencies=[Depends(require_admin)])
+def admin_grant(user_id: int, b: GrantIn):
+    user = db.admin_add_tokens(user_id, b.amount)
+    if not user:
+        raise HTTPException(404, "User not found")
+    log.info("admin granted %d tokens to user %d", b.amount, user_id)
+    return {"user": user}
+
+
+# ---------------- chat threads (persistent, one memory per thread) ----------------
+@app.get("/api/chat/threads")
+def threads_list(uid: int = Depends(required_user_id)):
+    return {"threads": db.list_threads(uid)}
+
+
+@app.post("/api/chat/threads")
+def threads_create(b: ThreadIn, uid: int = Depends(required_user_id)):
+    title, summary = b.title.strip(), ""
+    if b.problem_key:
+        data = db.cache_get(b.problem_key, touch=False)
+        if data:
+            title, summary = plain_title(data), topic_summary(data)
+    return {"thread": db.create_thread(uid, title, summary, b.problem_key)}
+
+
+@app.get("/api/chat/threads/{tid}/messages")
+def thread_messages(tid: int, uid: int = Depends(required_user_id)):
+    th = db.get_thread(uid, tid)
+    if not th:
+        raise HTTPException(404, "Chat not found")
+    return {"thread": {k: th[k] for k in ("id", "title", "problem_key", "created_at", "updated_at")}, "messages": db.list_messages(tid)}
+
+
+@app.delete("/api/chat/threads/{tid}")
+def thread_delete(tid: int, uid: int = Depends(required_user_id)):
+    if not db.delete_thread(uid, tid):
+        raise HTTPException(404, "Chat not found")
+    return {"ok": True}
+
+
+@app.post("/api/chat/threads/{tid}/messages")
+async def thread_send(tid: int, b: MsgIn, request: Request, uid: int = Depends(required_user_id)):
+    rate_limit(request, "llm", 20)
+    th = db.get_thread(uid, tid)
+    if not th:
+        raise HTTPException(404, "Chat not found")
+    if balancer.total:
+        memory = th["topic_summary"] or "A free math conversation (no particular problem yet)."
+        system = (f"You are a patient math tutor. Answer in {LANGS[b.lang]}, briefly and clearly, inline math in $...$. "
+                  "This conversation belongs to one topic; remember it and everything said earlier in it.\n"
+                  f"Topic of this conversation:\n{memory}")
+        ctx = json.dumps(b.context, ensure_ascii=False)[:1500] if b.context else ""
+        text = b.content + (f"\n\n[What the student is looking at right now: {ctx}]" if ctx else "")
+        history = history_to_contents(db.list_messages(tid, last=20))
+        reply = await gemini([{"text": text}], system, as_json=False, history=history)
+    else:
+        reply = "Demo mode: add GEMINI_API_KEY_1 to backend/.env to chat with the tutor."
+    saved = db.add_messages(tid, [("user", b.content), ("assistant", reply.strip() or "…")])
+    if th["title"] == "New chat" and not th["problem_key"]:  # a free chat is named after its first question
+        db.rename_thread(tid, re.sub(r"\s+", " ", b.content).strip()[:60])  # saved only after a successful answer
+    return {"reply": saved[1], "message": saved[0]}

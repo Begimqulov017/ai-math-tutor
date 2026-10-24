@@ -6,14 +6,15 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 // retries: only for requests that are safe to repeat. A sleeping free server (Render) answers its first
 // requests without CORS headers, which the browser reports as "Network error" - waiting a bit fixes it.
-async function call(method, path, body, retries = 0) {
+// tokenOverride: the admin panel uses its own short-lived token instead of the user's.
+async function call(method, path, body, retries = 0, tokenOverride = null) {
   for (let attempt = 0; ; attempt++) {
-    const a = loadAuth()
+    const bearer = tokenOverride || loadAuth()?.token
     let r
     try {
       r = await fetch(API_URL + path, {
         method,
-        headers: { 'Content-Type': 'application/json', ...(a?.token ? { Authorization: 'Bearer ' + a.token } : {}) },
+        headers: { 'Content-Type': 'application/json', ...(bearer ? { Authorization: 'Bearer ' + bearer } : {}) },
         body: body ? JSON.stringify(body) : undefined,
       })
     } catch {
@@ -28,7 +29,9 @@ async function call(method, path, body, retries = 0) {
     if (!r.ok) {
       if ((r.status === 502 || r.status === 503 || r.status === 504) && !json && attempt < retries) { await sleep(3000 * (attempt + 1)); continue }
       const d = json?.detail
-      const e = new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join('; ') : txt.slice(0, 200) || r.statusText)
+      const obj = d && typeof d === 'object' && !Array.isArray(d)
+      const e = new Error(typeof d === 'string' ? d : obj ? d.message || d.code : Array.isArray(d) ? d.map((x) => x.msg).join('; ') : txt.slice(0, 200) || r.statusText)
+      if (obj) e.code = d.code
       e.status = r.status
       throw e
     }
@@ -41,7 +44,7 @@ export const warmUp = () => fetch(API_URL + '/api/health').catch(() => {})
 
 export const analyzeProblem = (p) => call('POST', '/api/analyze-problem', p, 3)
 export const practiceCheck = (p) => call('POST', '/api/practice/check', p, 3)
-export const chatApi = (p) => call('POST', '/api/chat', p, 2)
+export const chatApi = (p) => call('POST', '/api/chat', p, 2) // guests: stateless chat
 export const checkSolution = (p) => call('POST', '/api/check-solution', p, 2)
 export const getGuestStatus = () => call('GET', '/api/guest-status', null, 3)
 export const login = (p) => call('POST', '/api/auth/login', p)
@@ -49,6 +52,20 @@ export const register = (p) => call('POST', '/api/auth/register', p)
 export const getMe = () => call('GET', '/api/me', null, 3)
 export const getSync = () => call('GET', '/api/sync', null, 3)
 export const putSync = (d) => call('PUT', '/api/sync', d, 2)
+
+// persistent chat threads (logged-in users)
+export const listThreads = () => call('GET', '/api/chat/threads', null, 2)
+export const createThread = (p) => call('POST', '/api/chat/threads', p, 2)
+export const getThread = (id) => call('GET', `/api/chat/threads/${id}/messages`, null, 2)
+export const sendThreadMessage = (id, p) => call('POST', `/api/chat/threads/${id}/messages`, p, 1)
+export const deleteThread = (id) => call('DELETE', `/api/chat/threads/${id}`)
+
+// admin panel
+export const adminLogin = (password) => call('POST', '/api/admin/login', { password })
+export const adminUsers = (token, q = '', offset = 0) =>
+  call('GET', `/api/admin/users?q=${encodeURIComponent(q)}&limit=50&offset=${offset}`, null, 0, token)
+export const adminAddTokens = (token, id, amount) => call('POST', `/api/admin/users/${id}/tokens`, { amount }, 0, token)
+
 export const fileToBase64 = (file) =>
   new Promise((res, rej) => {
     const fr = new FileReader()

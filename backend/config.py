@@ -41,3 +41,14 @@ GUEST_WINDOW_HOURS = _int("GUEST_WINDOW_HOURS", 0)  # 0 = the limit never resets
 # How to find the real visitor IP behind the hosting proxy (see README, "IP manzil")
 CLIENT_IP_HEADER = os.getenv("CLIENT_IP_HEADER", "").strip().lower()  # e.g. "true-client-ip" (set by Cloudflare)
 TRUSTED_PROXY_HOPS = max(1, _int("TRUSTED_PROXY_HOPS", 1))            # n-th X-Forwarded-For entry from the right
+
+# Daily tokens: every logged-in user gets this many problems per calendar day (Tashkent time)
+DAILY_TOKENS = _int("DAILY_TOKENS", 50)
+
+# Admin panel: the master password lives ONLY here (server environment), never in the code or the repository.
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+ADMIN_TOKEN_HOURS = _int("ADMIN_TOKEN_HOURS", 2)
+if not ADMIN_PASSWORD:
+    logging.info("ADMIN_PASSWORD is not set: the admin panel is disabled.")
+elif not (len(ADMIN_PASSWORD) == 16 and ADMIN_PASSWORD.isdigit()):
+    logging.warning("ADMIN_PASSWORD is not exactly 16 digits: nobody will be able to log in to the admin panel.")

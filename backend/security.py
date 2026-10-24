@@ -104,3 +104,19 @@ def is_loopback(ip: str) -> bool:
 def ip_hash(ip: str) -> str:
     """Only a keyed hash of the IP is stored in the database."""
     return hmac.new(config.JWT_SECRET.encode(), ip_bucket(ip).encode(), hashlib.sha256).hexdigest()
+
+
+# ---------------- admin ----------------
+def make_admin_token() -> str:
+    return jwt.encode({"sub": "admin", "adm": True, "exp": int(time.time()) + config.ADMIN_TOKEN_HOURS * 3600},
+                      config.JWT_SECRET, algorithm="HS256")
+
+
+def require_admin(authorization: str | None = Header(None)) -> None:
+    """Only a token issued by /api/admin/login passes; ordinary user tokens have no 'adm' claim."""
+    try:
+        payload = jwt.decode((authorization or "")[7:].strip(), config.JWT_SECRET, algorithms=["HS256"])
+    except jwt.PyJWTError:
+        raise HTTPException(401, "Admin login required")
+    if payload.get("adm") is not True:
+        raise HTTPException(401, "Admin login required")

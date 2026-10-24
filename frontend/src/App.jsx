@@ -15,10 +15,14 @@ import Board from './components/Board'
 import History from './components/History'
 import Progress from './components/Progress'
 import Auth from './components/Auth'
+import Admin from './components/Admin'
 import Practice from './components/Practice'
 import Handwritten from './components/Handwritten'
-import Chat from './components/Chat'
+import ChatSection from './components/ChatSection'
+import Workspace, { WorkspaceSkeleton } from './components/Workspace'
 import { Tex, Rich } from './components/Tex'
+
+const scrollToChat = () => document.getElementById('chat-section')?.scrollIntoView({ behavior: 'smooth', block: 'start' })
 
 export default function App() {
   const [lang, setLang] = useState('uz')
@@ -27,6 +31,7 @@ export default function App() {
   const [micActive, setMicActive] = useState(false)
   const [text, setText] = useState('')
   const [data, setData] = useState(null)
+  const [screen, setScreen] = useState('home') // 'home' (input) | 'work' (immersive workspace)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [step, setStep] = useState(0)
@@ -35,15 +40,14 @@ export default function App() {
   const [auth, setAuth] = useState(loadAuth) // { token, user } | null  (null = guest mode)
   const [synced, setSynced] = useState(false)
   const [activeId, setActiveId] = useState(null)
-  const [msgs, setMsgs] = useState([])
-  const [panel, setPanel] = useState(null) // 'history' | 'progress' | 'auth'
+  const [panel, setPanel] = useState(null) // 'history' | 'progress' | 'auth' | 'admin'
   const [authMode, setAuthMode] = useState('login')
   const [gain, setGain] = useState(null)
   const [guest, setGuest] = useState(null) // { used, limit } for guests
   const user = auth?.user || null
   const t = T[lang]
   const { speak, listen, stop } = useVoice(lang)
-  const errText = (e) => (e.status === 0 ? t.net : e.message === 'guest_limit' ? t.guestLimit
+  const errText = (e) => (e.status === 0 ? t.net : e.message === 'guest_limit' ? t.guestLimit : e.code === 'tokens_exhausted' ? t.tokensOut
     : e.status === 429 || e.status === 503 ? t.busy : t.err + ': ' + String(e.message).slice(0, 200))
 
   useEffect(() => { document.documentElement.classList.toggle('dark', dark) }, [dark])
@@ -53,6 +57,12 @@ export default function App() {
     if (user) setGuest(null)
     else getGuestStatus().then(setGuest).catch(() => {})
   }, [user?.id]) // eslint-disable-line
+  useEffect(() => { // secure-ish entry point: /#admin (the real protection is the server-side password)
+    const check = () => { if (window.location.hash === '#admin') setPanel('admin') }
+    check()
+    window.addEventListener('hashchange', check)
+    return () => window.removeEventListener('hashchange', check)
+  }, [])
 
   const updHistory = (fn) => setHistory((h) => { const n = fn(h); saveHistory(n); return n })
   const updMistakes = (fn) => setMistakes((m) => { const n = fn(m); saveMistakes(n); return n })
@@ -64,6 +74,7 @@ export default function App() {
     setTimeout(() => setGain((g) => (g?.id === id ? null : g)), 2600)
   }
   const openAuth = (mode = 'login') => { setAuthMode(mode); setPanel('auth') }
+  const closePanel = () => { if (panel === 'admin' && window.location.hash === '#admin') window.history.replaceState(null, '', window.location.pathname); setPanel(null) }
 
   // ---- account + cloud sync ----
   const pull = async () => {
@@ -95,44 +106,45 @@ export default function App() {
   const logout = async () => {
     try { await putSync({ history, mistakes }) } catch { /* offline: the last debounced sync stays */ }
     localLogout(); clearData()
-    setHistory([]); setMistakes([]); setData(null); setActiveId(null); setMsgs([]); setPanel(null)
+    setHistory([]); setMistakes([]); setData(null); setActiveId(null); setScreen('home'); setPanel(null)
   }
 
-  // keep the chat of the open problem saved
-  useEffect(() => {
-    if (activeId) updHistory((h) => h.map((i) => (i.id === activeId ? { ...i, chat: msgs } : i)))
-  }, [msgs]) // eslint-disable-line
-
+  // ---- solving ----
   const submit = async (img) => {
     setLoading(true); setError('')
+    setData(null); setStep(0); setScreen('work') // the immersive workspace opens at once; a skeleton shows while the AI works
+    window.scrollTo({ top: 0 })
     try {
       const { progress, guest: g, ...view } = await analyzeProblem({ text, lang, image_base64: img?.data ?? null, image_mime: img?.mime ?? 'image/png' })
-      setData(view); setStep(0); setMsgs([])
+      setData(view)
       if (view.demo) setActiveId(null)
       else {
         const id = Date.now()
         setActiveId(id)
-        updHistory((h) => [{ id, ts: id, text, data: view, chat: [] }, ...h])
+        updHistory((h) => [{ id, ts: id, text, data: view }, ...h])
       }
       if (g) setGuest(g)
       if (progress) { applyUser(progress.user); showGain(progress.xp_gained) }
     } catch (e) {
-      if (e.message === 'guest_limit') { // the server says: this IP used all its free problems
+      setScreen('home') // back to the input with a clear message
+      if (e.message === 'guest_limit') { // this IP used all its free problems
         setGuest((x) => ({ limit: x?.limit || 3, used: x?.limit || 3 }))
         openAuth('register')
       }
+      if (e.code === 'tokens_exhausted' && user) applyUser({ ...user, tokens_remaining: 0 })
       setError(errText(e))
     }
     setLoading(false)
   }
 
   const openItem = (i) => {
-    setText(i.text || ''); setData(i.data); setActiveId(i.id); setMsgs(i.chat || []); setStep(0)
-    setPanel(null); window.scrollTo({ top: 0, behavior: 'smooth' })
+    setText(i.text || ''); setData(i.data); setActiveId(i.id); setStep(0)
+    setScreen('work'); setPanel(null)
   }
-  const newProblem = () => { setData(null); setText(''); setActiveId(null); setMsgs([]); setPanel(null) }
+  const newProblem = () => { setData(null); setText(''); setActiveId(null); setScreen('home'); setPanel(null) }
   const removeItem = (id) => { updHistory((h) => h.filter((i) => i.id !== id)); if (id === activeId) setActiveId(null) }
   const clearAll = () => { updHistory(() => []); setActiveId(null) }
+  const openChat = () => { setScreen('work'); setPanel(null); setTimeout(scrollToChat, 350) }
 
   const onPractice = ({ level, index, q, userAnswer, user: u, xpGained, firstWrong }) => {
     applyUser(u); showGain(xpGained)
@@ -151,13 +163,16 @@ export default function App() {
 
   return (
     <>
-      <Navbar {...{ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, user }} onMic={toggleMic}
-        onHistory={() => setPanel('history')} onProgress={() => setPanel('progress')} onLogin={openAuth} />
-      <History lang={lang} open={panel === 'history'} onClose={() => setPanel(null)} items={history} activeId={activeId}
+      {screen === 'home' && (
+        <Navbar {...{ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, user }} onMic={toggleMic}
+          onHistory={() => setPanel('history')} onProgress={() => setPanel('progress')} onChat={openChat} onLogin={openAuth} />
+      )}
+      <History lang={lang} open={panel === 'history'} onClose={closePanel} items={history} activeId={activeId}
         onOpen={openItem} onDelete={removeItem} onClear={clearAll} onNew={newProblem} />
-      <Progress lang={lang} open={panel === 'progress'} onClose={() => setPanel(null)} user={user} mistakes={mistakes}
+      <Progress lang={lang} open={panel === 'progress'} onClose={closePanel} user={user} mistakes={mistakes}
         onFixed={fixMistake} onDelete={deleteMistake} onLogin={openAuth} />
-      <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={() => setPanel(null)} onSubmit={handleAuth} user={user} onLogout={logout} />
+      <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={closePanel} onSubmit={handleAuth} user={user} onLogout={logout} />
+      <Admin open={panel === 'admin'} onClose={closePanel} />
 
       <AnimatePresence>
         {gain && (
@@ -168,60 +183,79 @@ export default function App() {
         )}
       </AnimatePresence>
 
-      <main className="mx-auto max-w-6xl px-4 pb-28 space-y-5">
-        {!user && (
-          <div className="print:hidden glass mt-4 px-4 py-3 flex flex-wrap items-center gap-3 !border-indigo-300 dark:!border-indigo-800">
-            <span className="text-xl" aria-hidden="true">🔒</span>
-            <p className="flex-1 min-w-56 text-sm">
-              {t.guestNote}
-              {guest?.limit > 0 && (
-                <span className={`block font-bold mt-0.5 ${guest.used >= guest.limit ? 'text-rose-600' : 'text-indigo-600 dark:text-indigo-300'}`}>
-                  {t.guestCount.replace('{u}', guest.used).replace('{l}', guest.limit)}
-                </span>
-              )}
-            </p>
-            <button className="btn text-sm" onClick={() => openAuth('register')}>{t.reg}</button>
-            <button className="btn-ghost text-sm" onClick={() => openAuth('login')}>{t.login}</button>
-          </div>
-        )}
-        <div className="print:hidden"><ProblemInput {...{ lang, text, setText, loading }} onSubmit={submit} /></div>
-        {error && <p role="alert" className="text-rose-600 font-bold">{error}</p>}
-        {data && (
-          <>
-            {data.demo && <p className="text-sm text-amber-600">{t.demo}</p>}
-            <div className="flex justify-end print:hidden">
-              <button className="btn-ghost" onClick={() => window.print()}>🖨 {t.pdf}</button>
+      {screen === 'home' && (
+        <main className="mx-auto max-w-6xl px-4 pb-16 space-y-5">
+          {!user && (
+            <div className="print:hidden glass mt-4 px-4 py-3 flex flex-wrap items-center gap-3 !border-indigo-300 dark:!border-indigo-800">
+              <span className="text-xl" aria-hidden="true">🔒</span>
+              <p className="flex-1 min-w-56 text-sm">
+                {t.guestNote}
+                {guest?.limit > 0 && (
+                  <span className={`block font-bold mt-0.5 ${guest.used >= guest.limit ? 'text-rose-600' : 'text-indigo-600 dark:text-indigo-300'}`}>
+                    {t.guestCount.replace('{u}', guest.used).replace('{l}', guest.limit)}
+                  </span>
+                )}
+              </p>
+              <button className="btn text-sm" onClick={() => openAuth('register')}>{t.reg}</button>
+              <button className="btn-ghost text-sm" onClick={() => openAuth('login')}>{t.login}</button>
             </div>
-            <AnalysisCard lang={lang} data={data} />
-            <ConceptCard lang={lang} text={data.concept} />
-            <div className="grid lg:grid-cols-2 gap-5 items-start">
-              <div className="lg:sticky lg:top-20"><Board lang={lang} data={data} step={step} /></div>
-              <div className="print:hidden"><SolutionPlayer lang={lang} steps={data.steps} voiceOn={voiceOn} speak={speak} onStep={setStep} /></div>
-            </div>
-            <Variations lang={lang} items={data.variations} />
-            <div className="print:hidden">
-              <Practice lang={lang} practice={data.practice} dataKey={data.key} voiceOn={voiceOn} speak={speak} onResult={onPractice} />
-            </div>
-            <div className="print:hidden"><Handwritten lang={lang} problem={data.problem} /></div>
+          )}
+          <ProblemInput {...{ lang, text, setText, loading }} onSubmit={submit} />
+          {error && <p role="alert" className="text-rose-600 font-bold">{error}</p>}
+          {data && <button className="btn-ghost" onClick={() => setScreen('work')}>↩ {t.resume}</button>}
+          <footer className="pt-8 text-center">
+            <button className="text-xs text-slate-400 hover:text-slate-600" onClick={() => setPanel('admin')} aria-label="Admin">⚙</button>
+          </footer>
+        </main>
+      )}
 
-            {/* print-only: full solution + all exercises */}
-            <section className="hidden print:block space-y-3">
-              <h3 className="font-bold">{t.pSol}</h3>
-              <ol className="list-decimal pl-6 space-y-2">
-                {data.steps?.map((s, i) => <li key={i}><Tex tex={s.latex} block /><p><Rich text={s.comment} /></p></li>)}
-              </ol>
-              <h3 className="font-bold">{t.pPr}</h3>
-              {['easy', 'medium', 'hard'].map((k) => (
-                <div key={k}><h4 className="font-bold">{t[k]}</h4>
-                  <ol className="list-decimal pl-6">{(data.practice?.[k] || []).map((x, i) => <li key={i}><Tex tex={x.q} /></li>)}</ol>
+      <AnimatePresence>
+        {screen === 'work' && (
+          <Workspace key="workspace" lang={lang} user={user} title={data?.problem || (loading ? text.trim() || t.analyzingBig : t.chatTitle)}
+            onBack={() => setScreen('home')} onHistory={() => setPanel('history')} onProgress={() => setPanel('progress')}
+            showJump={!!data} onJumpChat={scrollToChat}>
+            {loading && !data && <WorkspaceSkeleton lang={lang} />}
+            {data && (
+              <>
+                {data.demo && <p className="text-sm text-amber-600">{t.demo}</p>}
+                <div className="flex justify-end print:hidden">
+                  <button className="btn-ghost" onClick={() => window.print()}>🖨 {t.pdf}</button>
                 </div>
-              ))}
-            </section>
-          </>
+                <div className="grid xl:grid-cols-3 gap-5 items-start">
+                  <div className="xl:col-span-2"><AnalysisCard lang={lang} data={data} /></div>
+                  <ConceptCard lang={lang} text={data.concept} />
+                </div>
+                <div className="grid lg:grid-cols-2 gap-6 items-start">
+                  <div className="lg:sticky lg:top-2"><Board lang={lang} data={data} step={step} /></div>
+                  <div className="print:hidden"><SolutionPlayer lang={lang} steps={data.steps} voiceOn={voiceOn} speak={speak} onStep={setStep} /></div>
+                </div>
+                <Variations lang={lang} items={data.variations} />
+                <div className="grid xl:grid-cols-2 gap-5 items-start print:hidden">
+                  <Practice lang={lang} practice={data.practice} dataKey={data.key} voiceOn={voiceOn} speak={speak} onResult={onPractice} />
+                  <Handwritten lang={lang} problem={data.problem} />
+                </div>
+
+                {/* print-only: full solution + all exercises */}
+                <section className="hidden print:block space-y-3">
+                  <h3 className="font-bold">{t.pSol}</h3>
+                  <ol className="list-decimal pl-6 space-y-2">
+                    {data.steps?.map((s, i) => <li key={i}><Tex tex={s.latex} block /><p><Rich text={s.comment} /></p></li>)}
+                  </ol>
+                  <h3 className="font-bold">{t.pPr}</h3>
+                  {['easy', 'medium', 'hard'].map((k) => (
+                    <div key={k}><h4 className="font-bold">{t[k]}</h4>
+                      <ol className="list-decimal pl-6">{(data.practice?.[k] || []).map((x, i) => <li key={i}><Tex tex={x.q} /></li>)}</ol>
+                    </div>
+                  ))}
+                </section>
+              </>
+            )}
+            {!(loading && !data) && (
+              <ChatSection lang={lang} user={user} data={data} step={step} voiceOn={voiceOn} speak={speak} listen={listen} onLogin={openAuth} />
+            )}
+          </Workspace>
         )}
-      </main>
-      <Chat lang={lang} voiceOn={voiceOn} speak={speak} listen={(cb) => listen(cb)} msgs={msgs} setMsgs={setMsgs}
-        context={data ? { problem: data.problem, topic: data.topic, currentStep: step + 1, step: data.steps?.[step] } : {}} />
+      </AnimatePresence>
     </>
   )
 }
