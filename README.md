@@ -28,6 +28,10 @@ npm run dev            # http://localhost:5173  (API manzili: VITE_API_URL, stan
 | `GEMINI_MODEL` | Model nomi |
 | `JWT_SECRET` | **Serverda majburiy.** Uzun tasodifiy matn (mehmon cheklovi ham shunga bog'liq) |
 | `DATABASE_URL` | PostgreSQL havolasi (serverda). Lokal kompyuterda bo'sh |
+| `BREVO_API_KEY`, `MAIL_FROM` | Email kodni yuborish (Brevo HTTPS API). **Render bepul tarifida SMTP yopiq**, shuning uchun shu yo'l tavsiya etiladi |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_USER`, `SMTP_PASSWORD` | Oddiy SMTP (VPS yoki pullik hosting uchun; Render bepulda ishlamaydi) |
+| `EMAIL_DEV_LOG` | `1` bo'lsa kod emailga emas, server konsoliga chiqadi (faqat lokal sinov uchun) |
+| `REQUIRE_EMAIL_VERIFICATION` | `true` (standart) = email kod majburiy; `false` = kodsiz ro'yxatdan o'tish (faqat lokal) |
 | `DAILY_TOKENS` | Har bir login qilgan foydalanuvchiga kuniga nechta masala (standart 50) |
 | `ADMIN_PASSWORD` | Admin panel paroli: **aynan 16 ta raqam**. Faqat serverning o'zgaruvchilarida (Render → Environment) yoki lokal `.env` da turadi. Bo'sh bo'lsa admin panel butunlay o'chiq |
 | `ADMIN_TOKEN_HOURS` | Admin seansi necha soat amal qiladi (standart 2) |
@@ -105,4 +109,24 @@ Environment: `VITE_API_URL=https://<backend-nomi>.onrender.com`.
 cd backend
 python tests/test_features.py     # tokenlar, kunlik tiklanish, admin, suhbat xotirasi
 python tests/test_migration.py    # eski bazani yangilash
+python tests/test_tts_otp.py      # nutq normalizatori, /api/tts, email kod oqimi
 ```
+
+## Neyron ovoz (UZ / RU / EN)
+- `POST /api/tts` `{"text": "...", "lang": "uz|ru|en"}` MP3 (`audio/mpeg`) qaytaradi. Ovozlar: `uz-UZ-MadinaNeural`, `ru-RU-SvetlanaNeural`, `en-US-AriaNeural` (kutubxona: `edge-tts`).
+- Matn avval so'zlarga aylantiriladi (`backend/speech.py`, `math_to_spoken_text`): `x^2` → «x kvadrat», `\sqrt` → «ildiz ostida», `=` → «teng», `\frac{a}{b}` → «kasr a bo'lingan b» va hokazo.
+- Bir xil gap faqat bir marta sintez qilinadi (server xotirasida keshlanadi), daqiqasiga 30 ta so'rov chegarasi bor.
+- Brauzer tomonda bitta umumiy `<audio>` elementi **birinchi bosishda** jim ovoz bilan "ochiladi" (iOS Safari / Android Chrome), keyin tarmoqdan kelgan har qanday ovoz shu orqali o'ynaydi. Server ovozi ishlamasa, brauzerning o'z ovozi (`speechSynthesis`) zaxira sifatida ishlatiladi.
+- **Eslatma:** `edge-tts` Microsoft Edge'ning rasmiy bo'lmagan (hujjatlashtirilmagan) xizmatidan foydalanadi: kafolat yo'q, Microsoft uni o'zgartirishi yoki cheklashi mumkin. Kutubxona yangilanib turishi kerak (`pip install -U edge-tts`). Jiddiy foydalanish uchun rasmiy Azure Speech (xuddi shu ovoz nomlari) ga o'tish mumkin.
+
+## Email tasdiqlash (6 xonali kod)
+1. `POST /api/auth/register` → kod emailga yuboriladi, akkaunt **hali yaratilmaydi** (`email_verifications` jadvalida kutadi).
+2. `POST /api/auth/verify` `{email, code}` → to'g'ri kod bo'lsa akkaunt yaratiladi va token beriladi.
+3. `POST /api/auth/resend` → yangi kod (har 60 soniyada bir marta; urinishlar nolga qaytadi).
+- Kod 10 daqiqa amal qiladi, 5 ta noto'g'ri urinishdan keyin yonib ketadi (qaytadan ro'yxatdan o'tish kerak), IP bo'yicha ham cheklangan (10 daqiqada 5 ta xat).
+- Email yuborilmasa yoki sozlanmagan bo'lsa, kutuvchi yozuv o'chiriladi va foydalanuvchi aniq xabar oladi (kutish cheklovi qolib ketmaydi).
+
+**Brevo (bepul) sozlash:** brevo.com'da ro'yxatdan o'ting → *Senders* bo'limida o'z email manzilingizni tasdiqlang (domen shart emas) → *SMTP & API → API keys* dan kalit oling →
+`BREVO_API_KEY=...` va `MAIL_FROM=<tasdiqlangan manzil>` ni Render **Environment** ga qo'ying. Bepul tarifdagi kunlik xat chegarasini Brevo saytidan tekshiring.
+
+**Lokal sinov:** `.env` ga `EMAIL_DEV_LOG=1` qo'ying — kod backend terminalida `VERIFICATION CODE for ...: 123456` ko'rinishida chiqadi.

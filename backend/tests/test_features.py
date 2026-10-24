@@ -1,6 +1,6 @@
 # Run from the backend folder:  python tests/test_features.py   (uses a temporary SQLite file; set DATABASE_URL to test PostgreSQL)
 import json, os, sys, tempfile
-os.environ.update(GEMINI_API_KEY_1="k1aaaa", JWT_SECRET="t" * 40, DB_PATH=tempfile.mktemp(suffix=".db"))
+os.environ.update(REQUIRE_EMAIL_VERIFICATION="false", GEMINI_API_KEY_1="k1aaaa", JWT_SECRET="t" * 40, DB_PATH=tempfile.mktemp(suffix=".db"))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from datetime import timedelta
 from sqlalchemy import update, select

@@ -2,16 +2,26 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { T } from '../lib/i18n'
 import { Tex, Rich } from './Tex'
+import { unlockAudio } from '../lib/useVoice'
+
+// what is read aloud for one step: the formula, then the explanation (the server turns LaTeX into words)
+const stepSpeech = (s) => (s ? `$${s.latex}$. ${s.comment || ''}` : '')
 
 export default function SolutionPlayer({ lang, steps = [], voiceOn, speak, onStep }) {
   const t = T[lang]
   const [i, setI] = useState(0)
   const [auto, setAuto] = useState(false)
   const [open, setOpen] = useState(false)
+  const [loadingK, setLoadingK] = useState(null)
   const last = steps.length - 1
+  const listenStep = async (s, k) => { // manual "read this step aloud"
+    unlockAudio()
+    setLoadingK(k)
+    try { await speak(stepSpeech(s)) } finally { setLoadingK(null) }
+  }
 
   useEffect(() => { setI(0); setAuto(false) }, [steps])
-  useEffect(() => { setOpen(false); onStep?.(i); if (voiceOn) speak(steps[i]?.comment) }, [i]) // eslint-disable-line
+  useEffect(() => { setOpen(false); onStep?.(i); if (voiceOn) speak(stepSpeech(steps[i])) }, [i]) // eslint-disable-line
   useEffect(() => {
     if (!auto) return
     if (i >= last) { setAuto(false); return }
@@ -32,7 +42,11 @@ export default function SolutionPlayer({ lang, steps = [], voiceOn, speak, onSte
                 className={`rounded-xl p-4 border ${cur ? 'border-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-800'}`}>
                 <div className="flex items-center gap-3">
                   <span className="grid place-items-center size-7 rounded-full bg-indigo-600 text-white text-sm font-bold shrink-0">{k + 1}</span>
-                  <div className="text-xl overflow-x-auto"><Tex tex={s.latex} block /></div>
+                  <div className="flex-1 min-w-0 text-xl overflow-x-auto"><Tex tex={s.latex} block /></div>
+                  <button className="ml-auto shrink-0 btn-ghost !px-2 !py-1 text-sm print:hidden" onClick={() => listenStep(s, k)}
+                    title={t.listenTitle} aria-label={`${t.listenTitle} (${k + 1})`}>
+                    {loadingK === k ? '…' : `🔊 ${t.listenBtn}`}
+                  </button>
                 </div>
                 {cur && (
                   <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="mt-3 pl-10 space-y-2">
@@ -56,9 +70,9 @@ export default function SolutionPlayer({ lang, steps = [], voiceOn, speak, onSte
         </AnimatePresence>
       </ol>
       <div className="mt-4 flex gap-2">
-        <button className="btn-ghost" disabled={i === 0} onClick={() => setI(i - 1)}>← {t.prev}</button>
-        <button className="btn" disabled={i === last} onClick={() => setI(i + 1)}>{t.next} →</button>
-        <button className="btn-ghost ml-auto" onClick={() => { if (i === last) setI(0); setAuto(!auto) }}>{auto ? `⏸ ${t.pause}` : `▶ ${t.play}`}</button>
+        <button className="btn-ghost" disabled={i === 0} onClick={() => { unlockAudio(); setI(i - 1) }}>← {t.prev}</button>
+        <button className="btn" disabled={i === last} onClick={() => { unlockAudio(); setI(i + 1) }}>{t.next} →</button>
+        <button className="btn-ghost ml-auto" onClick={() => { unlockAudio(); if (i === last) setI(0); setAuto(!auto) }}>{auto ? `⏸ ${t.pause}` : `▶ ${t.play}`}</button>
       </div>
     </section>
   )

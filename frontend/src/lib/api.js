@@ -31,7 +31,7 @@ async function call(method, path, body, retries = 0, tokenOverride = null) {
       const d = json?.detail
       const obj = d && typeof d === 'object' && !Array.isArray(d)
       const e = new Error(typeof d === 'string' ? d : obj ? d.message || d.code : Array.isArray(d) ? d.map((x) => x.msg).join('; ') : txt.slice(0, 200) || r.statusText)
-      if (obj) e.code = d.code
+      if (obj) { e.code = d.code; e.data = d }
       e.status = r.status
       throw e
     }
@@ -49,6 +49,8 @@ export const checkSolution = (p) => call('POST', '/api/check-solution', p, 2)
 export const getGuestStatus = () => call('GET', '/api/guest-status', null, 3)
 export const login = (p) => call('POST', '/api/auth/login', p)
 export const register = (p) => call('POST', '/api/auth/register', p)
+export const verifyEmail = (p) => call('POST', '/api/auth/verify', p)
+export const resendCode = (p) => call('POST', '/api/auth/resend', p)
 export const getMe = () => call('GET', '/api/me', null, 3)
 export const getSync = () => call('GET', '/api/sync', null, 3)
 export const putSync = (d) => call('PUT', '/api/sync', d, 2)
@@ -73,3 +75,12 @@ export const fileToBase64 = (file) =>
     fr.onerror = rej
     fr.readAsDataURL(file)
   })
+
+/** Neural voice (edge-tts on the server): text with LaTeX in, an MP3 Blob out. */
+export async function ttsBlob(text, lang, signal) {
+  const r = await fetch(API_URL + '/api/tts', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text, lang }), signal,
+  })
+  if (!r.ok) { const e = new Error('tts ' + r.status); e.status = r.status; throw e }
+  return r.blob()
+}

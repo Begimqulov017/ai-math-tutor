@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { T } from '../lib/i18n'
 import { chatApi, createThread, deleteThread, getThread, listThreads, sendThreadMessage } from '../lib/api'
 import { Rich, Tex } from './Tex'
+import { unlockAudio } from '../lib/useVoice'
 
 /** Persistent, topic-aware chat. Logged-in users: threads + messages live in the database and the AI remembers
  *  the topic and the conversation of the open thread. Guests: a temporary chat that is not saved. */
@@ -133,23 +134,27 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
           <div ref={box} className="flex-1 overflow-y-auto max-h-[65vh] space-y-2 pr-1" aria-live="polite">
             {messages.length === 0 && <p className="text-sm text-slate-500 py-6 text-center">{t.chatEmpty}</p>}
             {messages.map((m) => (
-              <p key={m.id} className={`max-w-[88%] rounded-2xl px-3 py-2 whitespace-pre-wrap ${m.role === 'user' ? 'ml-auto bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>
-                <Rich text={m.content} />
-              </p>
+              <div key={m.id} className={`max-w-[88%] rounded-2xl px-3 py-2 ${m.role === 'user' ? 'ml-auto bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>
+                <p className="whitespace-pre-wrap"><Rich text={m.content} /></p>
+                {m.role !== 'user' && (
+                  <button className="mt-1 text-xs font-bold text-indigo-600 dark:text-indigo-300 underline" title={t.listenTitle} aria-label={t.listenTitle}
+                    onClick={() => { unlockAudio(); speak(m.content) }}>🔊 {t.listenBtn}</button>
+                )}
+              </div>
             ))}
             {busy && <p className="text-sm text-slate-500">…</p>}
           </div>
           {messages.length === 0 && (
             <div className="flex flex-wrap gap-2 mt-2">
-              {t.chatChips.map((c) => <button key={c} className="btn-ghost text-sm" onClick={() => send(c)}>{c}</button>)}
+              {t.chatChips.map((c) => <button key={c} className="btn-ghost text-sm" onClick={() => { unlockAudio(); send(c) }}>{c}</button>)}
             </div>
           )}
           {err && <p role="alert" className="text-rose-600 text-sm font-bold mt-2">{err}</p>}
           <div className="mt-3 flex gap-2">
-            <button className="btn-ghost" aria-label={t.mic} title={t.mic} onClick={() => listen((x) => send(x))}>🎤</button>
+            <button className="btn-ghost" aria-label={t.mic} title={t.mic} onClick={() => { unlockAudio(); listen((x) => send(x)) }}>🎤</button>
             <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && send()} placeholder={t.ask} aria-label={t.ask}
               className="flex-1 min-w-0 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2" maxLength={2000} />
-            <button className="btn" onClick={() => send()} disabled={busy || !val.trim()}>{t.send}</button>
+            <button className="btn" onClick={() => { unlockAudio(); send() }} disabled={busy || !val.trim()}>{t.send}</button>
           </div>
         </div>
       </div>

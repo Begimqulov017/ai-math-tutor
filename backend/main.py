@@ -1,21 +1,26 @@
 """AI Math Tutor API."""
+import asyncio
 import hmac
 import json
 import logging
+import math
 import re
+import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import Literal
 
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
 
 import config
 import db
 from llm import balancer, gemini, parse_json
+from mailer import MailFailed, MailNotConfigured, send_code
 from prompts import DEMO, LANGS, SCHEMA
+from speech import _clip, math_to_spoken_text, synthesize
 from security import (client_ip, hash_password, ip_bucket, ip_hash, is_loopback, make_admin_token, make_token, optional_user_id,
                       rate_limit, require_admin, required_user_id, verify_password)
 
@@ -112,6 +117,22 @@ class RegisterIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     email: str = Field(max_length=120)
     password: str = Field(min_length=6, max_length=128)
+    lang: Lang = "uz"  # language of the verification e-mail
+
+
+class VerifyIn(BaseModel):
+    email: str = Field(max_length=120)
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+
+
+class ResendIn(BaseModel):
+    email: str = Field(max_length=120)
+    lang: Lang = "uz"
+
+
+class TtsIn(BaseModel):
+    text: str = Field(min_length=1, max_length=1500)
+    lang: Lang = "uz"
 
 
 class LoginIn(BaseModel):
@@ -209,17 +230,106 @@ def guest_status(request: Request, uid: int | None = Depends(optional_user_id)):
 
 
 # ---------------- auth ----------------
+def _otp() -> str:
+    return f"{secrets.randbelow(10 ** 6):06d}"
+
+
+def _wait_left(pending: dict) -> int:
+    """Seconds until another e-mail may be sent to this address (the send time = expiry - TTL)."""
+    sent_at = pending["expires_at"] - config.OTP_TTL_SECONDS
+    return max(0, math.ceil(config.OTP_RESEND_SECONDS - (time.time() - sent_at)))
+
+
+async def _mail_the_code(email: str, name: str, code: str, lang: str) -> None:
+    try:
+        await send_code(email, name, code, lang)
+    except MailNotConfigured:
+        db.verification_delete(email)
+        raise HTTPException(503, {"code": "mail_not_configured", "message": "E-mail sending is not configured on the server"})
+    except MailFailed:
+        db.verification_delete(email)  # do not lock the user out with a cooldown for a mail that never left
+        raise HTTPException(502, {"code": "mail_failed", "message": "The verification e-mail could not be sent, please try again"})
+
+
 @app.post("/api/auth/register")
-def register(b: RegisterIn, request: Request):
+async def register(b: RegisterIn, request: Request):
+    """Step 1: validate, store the pending registration and e-mail a 6-digit code. The account is created in /verify."""
     rate_limit(request, "auth", 10)
     email = b.email.strip().lower()
     if not EMAIL_RE.fullmatch(email):
         raise HTTPException(400, "Invalid email")
-    try:
-        uid = db.create_user(email, b.name.strip(), hash_password(b.password))
-    except db.EmailTaken:
+    if db.user_by_email(email):
         raise HTTPException(409, "This email is already registered")
+    pw_hash = await asyncio.to_thread(hash_password, b.password)  # bcrypt is slow on purpose: keep it off the event loop
+    name = b.name.strip()
+    if not config.REQUIRE_EMAIL_VERIFICATION:  # switched off (e.g. local development): register at once
+        try:
+            uid = db.create_user(email, name, pw_hash)
+        except db.EmailTaken:
+            raise HTTPException(409, "This email is already registered")
+        return {"token": make_token(uid), "user": db.get_user(uid)}
+    rate_limit(request, "regmail", 5, 600)  # nobody can use us to flood mailboxes
+    pending = db.verification_get(email)
+    if pending and _wait_left(pending) > 0:
+        raise HTTPException(429, {"code": "resend_wait", "message": "Please wait before requesting a new code", "retry_after": _wait_left(pending)})
+    code = _otp()
+    db.verification_put(email, name, pw_hash, code, time.time() + config.OTP_TTL_SECONDS)
+    await _mail_the_code(email, name, code, b.lang)
+    return {"status": "verification_sent", "email": email, "expires_in": config.OTP_TTL_SECONDS, "resend_after": config.OTP_RESEND_SECONDS}
+
+
+@app.post("/api/auth/verify")
+def verify_email(b: VerifyIn, request: Request):
+    """Step 2: the right code creates the account and logs the user in."""
+    rate_limit(request, "verify", 15)
+    email = b.email.strip().lower()
+    pending = db.verification_get(email)
+    if not pending or time.time() > pending["expires_at"]:
+        db.verification_delete(email)
+        raise HTTPException(410, {"code": "code_expired", "message": "The code has expired, please request a new one"})
+    if pending["attempts"] >= config.OTP_MAX_ATTEMPTS:
+        db.verification_delete(email)
+        raise HTTPException(429, {"code": "too_many_attempts", "message": "Too many wrong codes, please register again"})
+    if not hmac.compare_digest(pending["code"].encode(), b.code.encode()):
+        left = config.OTP_MAX_ATTEMPTS - db.verification_bump(email)
+        if left <= 0:
+            db.verification_delete(email)  # the code is burned: a brute-force run gets at most OTP_MAX_ATTEMPTS guesses
+            raise HTTPException(429, {"code": "too_many_attempts", "message": "Too many wrong codes, please register again"})
+        raise HTTPException(400, {"code": "wrong_code", "message": "Wrong code", "attempts_left": left})
+    try:
+        uid = db.create_user(email, pending["name"], pending["pw_hash"])
+    except db.EmailTaken:
+        db.verification_delete(email)
+        raise HTTPException(409, "This email is already registered")
+    db.verification_delete(email)
     return {"token": make_token(uid), "user": db.get_user(uid)}
+
+
+@app.post("/api/auth/resend")
+async def resend_code(b: ResendIn, request: Request):
+    rate_limit(request, "regmail", 5, 600)
+    email = b.email.strip().lower()
+    pending = db.verification_get(email)
+    if not pending:
+        raise HTTPException(410, {"code": "code_expired", "message": "Please register again"})
+    if _wait_left(pending) > 0:
+        raise HTTPException(429, {"code": "resend_wait", "message": "Please wait before requesting a new code", "retry_after": _wait_left(pending)})
+    code = _otp()
+    db.verification_put(email, pending["name"], pending["pw_hash"], code, time.time() + config.OTP_TTL_SECONDS)  # new code, attempts reset
+    await _mail_the_code(email, pending["name"], code, b.lang)
+    return {"status": "verification_sent", "email": email, "expires_in": config.OTP_TTL_SECONDS, "resend_after": config.OTP_RESEND_SECONDS}
+
+
+# ---------------- neural voice ----------------
+@app.post("/api/tts")
+async def tts(b: TtsIn, request: Request):
+    """Text (with LaTeX) -> spoken words -> MP3 in a neural voice (uz / ru / en)."""
+    rate_limit(request, "tts", 30)
+    spoken = _clip(math_to_spoken_text(b.text, b.lang), 900)
+    if not spoken:
+        raise HTTPException(400, "Nothing to read")
+    audio = await synthesize(spoken, b.lang)
+    return Response(content=audio, media_type="audio/mpeg", headers={"Cache-Control": "private, max-age=86400"})
 
 
 @app.post("/api/auth/login")

@@ -52,3 +52,18 @@ if not ADMIN_PASSWORD:
     logging.info("ADMIN_PASSWORD is not set: the admin panel is disabled.")
 elif not (len(ADMIN_PASSWORD) == 16 and ADMIN_PASSWORD.isdigit()):
     logging.warning("ADMIN_PASSWORD is not exactly 16 digits: nobody will be able to log in to the admin panel.")
+
+# E-mail verification: a 6-digit code must be entered before the account is created
+REQUIRE_EMAIL_VERIFICATION = os.getenv("REQUIRE_EMAIL_VERIFICATION", "true").strip().lower() not in ("0", "false", "no", "off")
+OTP_TTL_SECONDS = _int("OTP_TTL_SECONDS", 600)       # the code is valid for 10 minutes
+OTP_MAX_ATTEMPTS = _int("OTP_MAX_ATTEMPTS", 5)       # wrong guesses before the code is burned
+OTP_RESEND_SECONDS = _int("OTP_RESEND_SECONDS", 60)  # minimum pause between two e-mails to the same address
+# How the e-mail is sent (first configured wins): Brevo HTTPS API -> SMTP -> console (EMAIL_DEV_LOG, development only)
+BREVO_API_KEY = os.getenv("BREVO_API_KEY", "").strip()
+MAIL_FROM = os.getenv("MAIL_FROM", "").strip()       # a sender address verified at your mail provider
+MAIL_FROM_NAME = os.getenv("MAIL_FROM_NAME", "AI Math Tutor").strip()
+SMTP_HOST = os.getenv("SMTP_HOST", "").strip()
+SMTP_PORT = _int("SMTP_PORT", 587)
+SMTP_USER = os.getenv("SMTP_USER", "").strip()
+SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
+EMAIL_DEV_LOG = os.getenv("EMAIL_DEV_LOG", "").strip().lower() in ("1", "true", "yes", "on")

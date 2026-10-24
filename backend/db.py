@@ -127,6 +127,15 @@ chat_messages = Table(
     Column("content", Text, nullable=False),
     Column("created_at", Float, nullable=False),
 )
+email_verifications = Table(  # a registration waiting for its 6-digit code (the account is created only after it)
+    "email_verifications", metadata,
+    Column("email", String(120), primary_key=True),
+    Column("name", String(60), nullable=False),
+    Column("pw_hash", Text, nullable=False),
+    Column("code", String(10), nullable=False),
+    Column("expires_at", Float, nullable=False),  # DOUBLE PRECISION on PostgreSQL, REAL on SQLite
+    Column("attempts", Integer, nullable=False, server_default="0"),
+)
 guest_usage = Table(  # IP is stored only as a keyed hash
     "guest_usage", metadata,
     Column("ip_hash", String(64), primary_key=True),
@@ -503,3 +512,36 @@ def list_messages(tid: int, last: int | None = None) -> list:
 def rename_thread(tid: int, title: str) -> None:
     with conn() as c:
         c.execute(update(chat_threads).where(chat_threads.c.id == tid).values(title=title[:200]))
+
+
+# ---------------- e-mail verification (OTP) ----------------
+@_retry
+def verification_put(email: str, name: str, pw_hash: str, code: str, expires_at: float) -> None:
+    """Start (or restart) a pending registration: a new code and zero wrong attempts."""
+    stmt = _insert(email_verifications).values(email=email, name=name, pw_hash=pw_hash, code=code, expires_at=expires_at, attempts=0)
+    stmt = stmt.on_conflict_do_update(index_elements=["email"], set_={k: stmt.excluded[k] for k in ("name", "pw_hash", "code", "expires_at", "attempts")})
+    with conn() as c:
+        c.execute(delete(email_verifications).where(email_verifications.c.expires_at < time.time() - 86400))  # tidy up old rows
+        c.execute(stmt)
+
+
+@_retry
+def verification_get(email: str):
+    with conn() as c:
+        r = c.execute(select(email_verifications).where(email_verifications.c.email == email)).mappings().first()
+        return dict(r) if r else None
+
+
+@_retry
+def verification_bump(email: str) -> int:
+    """One more wrong guess; returns the number of wrong guesses so far."""
+    with conn() as c:
+        c.execute(update(email_verifications).where(email_verifications.c.email == email).values(attempts=email_verifications.c.attempts + 1))
+        r = c.execute(select(email_verifications.c.attempts).where(email_verifications.c.email == email)).first()
+        return int(r[0]) if r else 0
+
+
+@_retry
+def verification_delete(email: str) -> None:
+    with conn() as c:
+        c.execute(delete(email_verifications).where(email_verifications.c.email == email))

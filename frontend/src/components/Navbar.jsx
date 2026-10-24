@@ -1,6 +1,7 @@
 import { motion } from 'framer-motion'
 import { T } from '../lib/i18n'
 import { levelInfo } from '../lib/store'
+import { stopSpeaking, unlockAudio } from '../lib/useVoice'
 
 export default function Navbar({ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, onMic, onHistory, onProgress, onChat, onLogin, user }) {
   const t = T[lang]
@@ -21,7 +22,7 @@ export default function Navbar({ lang, setLang, dark, setDark, voiceOn, setVoice
         <button className="btn-ghost" onClick={onHistory} aria-label={t.hist} title={t.hist}>🕘</button>
         <button className="btn-ghost" onClick={onChat} aria-label={t.chatTitle} title={t.chatTitle}>💬</button>
         <button className={`btn-ghost ${micActive ? '!bg-red-500 text-white' : ''}`} onClick={onMic} aria-label={t.mic} title={t.mic}>🎤</button>
-        <button className={`btn-ghost ${voiceOn ? '!bg-indigo-600 text-white' : ''}`} onClick={() => setVoiceOn(!voiceOn)} aria-pressed={voiceOn} aria-label={t.voice} title={t.voice}>🔊</button>
+        <button className={`btn-ghost ${voiceOn ? '!bg-indigo-600 text-white' : ''}`} onClick={() => { unlockAudio(); if (voiceOn) stopSpeaking(); setVoiceOn(!voiceOn) }} aria-pressed={voiceOn} aria-label={t.voice} title={t.voice}>🔊</button>
         <button className="btn-ghost" onClick={() => setDark(!dark)} aria-label="Theme">{dark ? '☀️' : '🌙'}</button>
         {user ? (
           <>

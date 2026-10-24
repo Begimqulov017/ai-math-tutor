@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { T } from './lib/i18n'
-import { analyzeProblem, getGuestStatus, getMe, getSync, login, putSync, register, warmUp } from './lib/api'
+import { analyzeProblem, getGuestStatus, getMe, getSync, login, putSync, register, resendCode, verifyEmail, warmUp } from './lib/api'
 import { useVoice } from './lib/useVoice'
 import {
   clearAuth, clearData, loadAuth, loadHistory, loadMistakes, mergeData,
@@ -48,6 +48,9 @@ export default function App() {
   const t = T[lang]
   const { speak, listen, stop } = useVoice(lang)
   const errText = (e) => (e.status === 0 ? t.net : e.message === 'guest_limit' ? t.guestLimit : e.code === 'tokens_exhausted' ? t.tokensOut
+    : e.code === 'wrong_code' ? t.otpWrong.replace('{n}', e.data?.attempts_left ?? '') : e.code === 'code_expired' ? t.otpExpired
+    : e.code === 'too_many_attempts' ? t.otpTooMany : e.code === 'resend_wait' ? t.otpWait.replace('{s}', e.data?.retry_after ?? 60)
+    : e.code === 'mail_failed' ? t.mailFail : e.code === 'mail_not_configured' ? t.mailOff : e.status === 409 ? t.emailTaken
     : e.status === 429 || e.status === 503 ? t.busy : t.err + ': ' + String(e.message).slice(0, 200))
 
   useEffect(() => { document.documentElement.classList.toggle('dark', dark) }, [dark])
@@ -95,13 +98,26 @@ export default function App() {
     return () => clearTimeout(id)
   }, [history, mistakes, auth, synced]) // eslint-disable-line
 
-  const handleAuth = async (mode, name, email, password) => {
-    let r
-    try { r = await (mode === 'login' ? login({ email, password }) : register({ name, email, password })) } catch (e) { throw new Error(errText(e)) }
+  const finishLogin = async (r) => {
     const a = { token: r.token, user: r.user }
     saveAuth(a); setAuth(a)
     try { await pull() } catch (e) { clearAuth(); setAuth(null); throw new Error(errText(e)) }
     setPanel(null)
+  }
+  // log in, or sign up step 1 (a 6-digit code is e-mailed; the account exists only after step 2)
+  const handleAuth = async (mode, name, email, password) => {
+    let r
+    try { r = await (mode === 'login' ? login({ email, password }) : register({ name, email, password, lang })) } catch (e) { throw new Error(errText(e)) }
+    if (r.token) { await finishLogin(r); return { done: true } } // logged in (or verification is switched off on the server)
+    return { pending: true, email: r.email, resend_after: r.resend_after }
+  }
+  const handleVerify = async (email, code) => { // sign up step 2
+    let r
+    try { r = await verifyEmail({ email, code }) } catch (e) { throw new Error(errText(e)) }
+    await finishLogin(r)
+  }
+  const handleResend = async (email) => {
+    try { return await resendCode({ email, lang }) } catch (e) { throw new Error(errText(e)) }
   }
   const logout = async () => {
     try { await putSync({ history, mistakes }) } catch { /* offline: the last debounced sync stays */ }
@@ -171,7 +187,7 @@ export default function App() {
         onOpen={openItem} onDelete={removeItem} onClear={clearAll} onNew={newProblem} />
       <Progress lang={lang} open={panel === 'progress'} onClose={closePanel} user={user} mistakes={mistakes}
         onFixed={fixMistake} onDelete={deleteMistake} onLogin={openAuth} />
-      <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={closePanel} onSubmit={handleAuth} user={user} onLogout={logout} />
+      <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={closePanel} onSubmit={handleAuth} onVerify={handleVerify} onResend={handleResend} user={user} onLogout={logout} />
       <Admin open={panel === 'admin'} onClose={closePanel} />
 
       <AnimatePresence>
