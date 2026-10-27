@@ -42,7 +42,7 @@ export default function SolutionPlayer({ lang, steps = [], voiceOn, speak, onSte
                 className={`rounded-xl p-4 border ${cur ? 'border-indigo-400 bg-indigo-50/70 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-800'}`}>
                 <div className="flex items-center gap-3">
                   <span className="grid place-items-center size-7 rounded-full bg-indigo-600 text-white text-sm font-bold shrink-0">{k + 1}</span>
-                  <div className="flex-1 min-w-0 text-xl overflow-x-auto"><Tex tex={s.latex} block /></div>
+                  <div className="flex-1 min-w-0 text-xl overflow-x-auto no-scrollbar"><Tex tex={s.latex} block /></div>
                   <button className="ml-auto shrink-0 btn-ghost !px-2 !py-1 text-sm print:hidden" onClick={() => listenStep(s, k)}
                     title={t.listenTitle} aria-label={`${t.listenTitle} (${k + 1})`}>
                     {loadingK === k ? '…' : `🔊 ${t.listenBtn}`}

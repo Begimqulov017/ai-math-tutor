@@ -54,7 +54,7 @@ export default function Topics({ lang, onStart }) {
                       <h4 className="font-display text-lg font-bold leading-snug">{s.name[lang]}</h4>
                       <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-xs font-bold ${LEVEL[s.lv]}`}>{t[s.lv]}</span>
                     </div>
-                    <div className="flex-1 overflow-x-auto rounded-xl bg-slate-50 px-3 py-2 text-lg dark:bg-white/5"><Tex tex={q} /></div>
+                    <div className="flex-1 overflow-x-auto no-scrollbar rounded-xl bg-slate-50 px-3.5 py-2.5 text-lg dark:bg-white/5 flex items-center"><Tex tex={q} /></div>
                     <button className="btn w-full" onClick={() => onStart(q)}>▶ {t.startLesson}</button>
                   </li>
                 )

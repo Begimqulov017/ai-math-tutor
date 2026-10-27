@@ -2,24 +2,24 @@
 
 LANGS = {"uz": "Uzbek (Latin script)", "ru": "Russian", "en": "English"}
 
-SCHEMA = r"""Return ONLY valid JSON (no markdown) with exactly these keys:
+SCHEMA = r"""Return ONLY valid, concise JSON (no markdown) with these exact keys so the response streams in 1-2 seconds:
 {"problem": "the problem: a pure equation/expression as LaTeX; a word problem as normal text with every formula inside $...$",
  "topic": {"area": "", "topic": "", "method": ""},
  "prerequisites": [{"title": "", "latex": ""}],
- "concept": "5th-grader explanation with a real-world analogy; inline math in $...$",
+ "concept": "short 5th-grader explanation with a real-world analogy (1-2 concise sentences); inline math in $...$",
  "steps": [{"latex": "full expression of this step; wrap ONLY the part that changed in \\hl{...}",
-            "comment": "friendly why-explanation, inline math in $...$",
-            "why": "the underlying mathematical law/theorem",
+            "comment": "concise friendly why-explanation (1 sentence), inline math in $...$",
+            "why": "short underlying mathematical law/theorem",
             "focus": []}],
  "variations": [{"title": "", "latex": "", "note": ""}],
  "practice": {"easy": [{"q": "", "answer": "", "hint": ""}], "medium": [], "hard": []},
  "is_geometry": false,
  "geometry_svg_or_coords": null}
 Rules:
+- Keep output crisp and concise for fast generation: 2 prerequisites, 3-5 clear steps, 2-3 variations, and 2 practice items per level (q: LaTeX or text with $...$; answer: short plain answer, several answers separated by commas).
 - In JSON strings write every LaTeX backslash doubled (like \\frac, \\sqrt, \\hl).
-- 2-3 prerequisites; 4-8 steps; "variations" must cover ALL edge cases and problem types of the topic; 3 practice items per level (q: LaTeX or text with $...$; answer: short plain answer, several answers separated by commas).
 - "is_geometry" is true ONLY for geometry problems (planimetry/stereometry: triangles, circles, quadrilaterals, angles, segments, shapes on a coordinate plane). For arithmetic, fractions, equations, functions, derivatives, trigonometric identities and word problems that are not about shapes it MUST be false and "geometry_svg_or_coords" MUST be null.
-- When is_geometry is true, "geometry_svg_or_coords" is: {"points":[{"name":"A","x":0,"y":0}],"segments":[{"from":"A","to":"B","label":"5 cm"}],"polygons":[["A","B","C"]],"circles":[{"center":"O","r":3,"label":"r"}],"rightAngles":[{"at":"B","a":"A","b":"C"}],"angles":[{"at":"A","a":"B","b":"C","label":"60°"}]} with realistic coordinates that match the given lengths and angles (for stereometry draw the most informative plane projection or section). Each step may carry "focus": names of the diagram points/segments it is about, e.g. ["AB","C"].
+- When is_geometry is true, "geometry_svg_or_coords" is: {"points":[{"name":"A","x":0,"y":0}],"segments":[{"from":"A","to":"B","label":"5 cm"}],"polygons":[["A","B","C"]],"circles":[{"center":"O","r":3,"label":"r"}],"rightAngles":[{"at":"B","a":"A","b":"C"}],"angles":[{"at":"A","a":"B","b":"C","label":"60°"}]} with realistic coordinates that match the given lengths and angles. Each step may carry "focus": names of the diagram points/segments it is about, e.g. ["AB","C"].
 - All text fields are written in the requested language; LaTeX stays universal."""
 
 # Added to the prompt for Premium / VIP users: function graphs and a richer geometry analysis

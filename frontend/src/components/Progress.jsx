@@ -24,8 +24,8 @@ function Mistake({ lang, m, onFixed, onDelete }) {
   }
   return (
     <li className="rounded-xl border border-slate-200 dark:border-slate-800 p-3 space-y-1">
-      <div className="overflow-x-auto"><Tex tex={m.q} /></div>
-      <div className="text-xs text-slate-500">{[m.topic, t[m.level]].filter(Boolean).join(' • ')} • {t.yourAns}: <b>{m.userAnswer}</b></div>
+      <div className="overflow-x-auto no-scrollbar"><Tex tex={m.q} /></div>
+      <div className="text-xs text-slate-500">{[m.topic, t[m.level]].filter(Boolean).join(' • ')} • {t.yourAns}: <b><Tex tex={m.userAnswer} /></b></div>
       {open ? (
         <div className="flex gap-2">
           <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && run()} aria-label={t.answer} placeholder={t.answer}

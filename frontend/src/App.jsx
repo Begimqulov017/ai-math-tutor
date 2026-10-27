@@ -106,11 +106,12 @@ export default function App() {
     return () => clearTimeout(id)
   }, [history, mistakes, auth, synced]) // eslint-disable-line
 
-  const finishLogin = async (r) => {
+  const finishLogin = (r) => {
     const a = { token: r.token, user: r.user }
     saveAuth(a); setAuth(a)
-    try { await pull() } catch (e) { clearAuth(); setAuth(null); throw new Error(errText(e)) }
     setPanel(null)
+    // Run cloud sync asynchronously in the background so login never hangs or clears the token
+    pull().catch(() => { setSynced(true) })
   }
   // log in, or sign up step 1 (a 6-digit code is e-mailed; the account exists only after step 2)
   const handleAuth = async (mode, p) => {
@@ -119,13 +120,13 @@ export default function App() {
       r = await (mode === 'login' ? login({ email: p.email, password: p.password })
         : register({ name: p.name, username: p.username, email: p.email, password: p.password, password_confirm: p.confirm, lang }))
     } catch (e) { throw new Error(errText(e)) }
-    if (r.token) { await finishLogin(r); return { done: true } } // logged in (or verification is switched off on the server)
+    if (r.token) { finishLogin(r); return { done: true } } // logged in (or verification is switched off on the server)
     return { pending: true, email: r.email, resend_after: r.resend_after }
   }
   const handleVerify = async (email, code) => { // sign up step 2
     let r
     try { r = await verifyEmail({ email, code }) } catch (e) { throw new Error(errText(e)) }
-    await finishLogin(r)
+    finishLogin(r)
   }
   const handleResend = async (email) => {
     try { return await resendCode({ email, lang }) } catch (e) { throw new Error(errText(e)) }

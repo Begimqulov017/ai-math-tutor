@@ -52,14 +52,14 @@ export default function Practice({ lang, practice = {}, dataKey, voiceOn, speak,
       {!dataKey && <p className="mt-3 text-sm text-amber-600">{t.expired}</p>}
       {q ? (
         <div className="mt-4 space-y-3">
-          <div className="text-xl overflow-x-auto"><Tex tex={q.q} block /></div>
+          <div className="text-xl overflow-x-auto no-scrollbar"><Tex tex={q.q} block /></div>
           <div className="flex flex-wrap gap-2">
             <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && check()} placeholder={t.answer} aria-label={t.answer}
               className="flex-1 min-w-40 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-2" />
             <button className="btn" onClick={check} disabled={busy || !dataKey}>{busy ? '…' : t.check}</button>
             <button className="btn-ghost" onClick={() => { setHint(true); if (voiceOn) speak(q.hint) }}>💡 {t.hint}</button>
           </div>
-          {hint && <p className="rounded-lg bg-amber-50 dark:bg-amber-950/40 p-3 text-sm">{q.hint}</p>}
+          {hint && <p className="rounded-lg bg-amber-50 dark:bg-amber-950/40 p-3 text-sm"><Rich text={q.hint} /></p>}
           {msg && <p role="alert" className="text-rose-600 text-sm font-bold">{msg}</p>}
           {res !== null && (
             <p role="status" className={`font-bold ${res ? 'text-emerald-600' : 'text-rose-600'}`}>

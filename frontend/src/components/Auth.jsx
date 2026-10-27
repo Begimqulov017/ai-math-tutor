@@ -19,8 +19,12 @@ function Field({ id, label, icon, hint, tone, right, children }) {
   return (
     <div className="space-y-1.5">
       <label htmlFor={id} className="text-sm font-semibold">{label}</label>
-      <div className="relative">
-        {icon && <span aria-hidden="true" className="pointer-events-none absolute left-3.5 top-1/2 -translate-y-1/2 text-slate-400">{icon}</span>}
+      <div className="relative flex items-center">
+        {icon && (
+          <span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 flex w-11 items-center justify-center text-slate-400 select-none">
+            {icon}
+          </span>
+        )}
         {children}
         {right}
       </div>
@@ -41,10 +45,10 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
   const [uname, setUname] = useState('idle') // idle | checking | ok | taken | bad
   const [err, setErr] = useState('')
   const [info, setInfo] = useState('')
-  const [busy, setBusy] = useState(false)
+  const [loading, setLoading] = useState(false)
   const set = (k) => (e) => setF((x) => ({ ...x, [k]: e.target.value }))
 
-  useEffect(() => { if (open) { setView(startMode === 'register' ? 'register' : 'login'); setErr(''); setInfo(''); setCode('') } }, [open, startMode])
+  useEffect(() => { if (open) { setView(startMode === 'register' ? 'register' : 'login'); setErr(''); setInfo(''); setCode(''); setLoading(false) } }, [open, startMode])
   useEffect(() => {
     if (cooldown <= 0) return
     const id = setTimeout(() => setCooldown((c) => c - 1), 1000)
@@ -63,19 +67,32 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
     }, 450)
     return () => { live = false; clearTimeout(id) }
   }, [f.username, view]) // eslint-disable-line
+
   const verify = async (value = code) => {
-    if (busy || value.length !== 6) return
-    setBusy(true); setErr(''); setInfo('')
-    try { await onVerify(pendingEmail, value) } catch (x) { setErr(String(x.message)); setCode('') }
-    setBusy(false)
+    if (loading || value.length !== 6) return
+    setLoading(true); setErr(''); setInfo('')
+    try {
+      await onVerify(pendingEmail, value)
+    } catch (x) {
+      setErr(String(x?.message || x))
+      setCode('')
+    } finally {
+      setLoading(false)
+    }
   }
   useEffect(() => { if (view === 'code' && code.length === 6) verify(code) }, [code]) // eslint-disable-line
 
   const run = (fn) => async (e) => {
     e?.preventDefault()
-    setBusy(true); setErr(''); setInfo('')
-    try { await fn() } catch (x) { setErr(String(x.message)) }
-    setBusy(false)
+    if (loading) return
+    setLoading(true); setErr(''); setInfo('')
+    try {
+      await fn()
+    } catch (x) {
+      setErr(String(x?.message || x))
+    } finally {
+      setLoading(false)
+    }
   }
   const login = run(async () => { await onSubmit('login', { email: f.email.trim(), password: f.password }); setF((x) => ({ ...x, password: '' })) })
   const register = run(async () => {
@@ -106,12 +123,12 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
 
   const eye = (
     <button type="button" onClick={() => setShow(!show)} aria-label={show ? t.hidePw : t.showPw} aria-pressed={show}
-      className="absolute right-3 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-white/10">{show ? '🙈' : '👁️'}</button>
+      className="absolute right-2.5 top-1/2 -translate-y-1/2 rounded-lg p-1.5 text-slate-500 hover:bg-slate-100 dark:hover:bg-white/10">{show ? '🙈' : '👁️'}</button>
   )
   const inp = (extra = '') => `field ${extra}`
   const passwordField = (id, label, key, auto, right = eye) => (
     <Field id={id} label={label} icon="🔒" right={right}>
-      <input id={id} className={inp('pl-11 pr-12')} type={show ? 'text' : 'password'} required minLength={key === 'password' && view === 'login' ? 1 : 8} value={f[key]} onChange={set(key)} autoComplete={auto} />
+      <input id={id} className={inp('!pl-11 !pr-11')} type={show ? 'text' : 'password'} required minLength={key === 'password' && view === 'login' ? 1 : 8} value={f[key]} onChange={set(key)} autoComplete={auto} />
     </Field>
   )
   const strengthMeter = f.password && (
@@ -155,11 +172,11 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
                 <p className="text-sm text-slate-600 dark:text-slate-300">{t.otpSent.replace('{email}', pendingEmail)}</p>
                 <Field id="auth-code" label={t.otpLabel}>
                   <input id="auth-code" className={inp('text-center font-mono text-2xl tracking-[0.5em]')} inputMode="numeric" pattern="[0-9]*" maxLength={6} autoComplete="one-time-code" autoFocus
-                    value={code} disabled={busy} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} />
+                    value={code} disabled={loading} onChange={(e) => setCode(e.target.value.replace(/\D/g, '').slice(0, 6))} />
                 </Field>
                 {msgs}
-                <button className="btn w-full" disabled={busy || code.length !== 6} onClick={() => verify()}>{busy ? '…' : t.otpVerify}</button>
-                <button type="button" className="btn-ghost w-full text-sm" disabled={busy || cooldown > 0} onClick={resend}>{cooldown > 0 ? t.otpResendIn.replace('{s}', cooldown) : t.otpResend}</button>
+                <button className="btn w-full" disabled={loading || code.length !== 6} onClick={() => verify()}>{loading ? '…' : t.otpVerify}</button>
+                <button type="button" className="btn-ghost w-full text-sm" disabled={loading || cooldown > 0} onClick={resend}>{cooldown > 0 ? t.otpResendIn.replace('{s}', cooldown) : t.otpResend}</button>
                 <p className="text-xs text-slate-500">{t.otpSpam}</p>
                 <button type="button" className="text-sm font-semibold text-indigo-600 underline dark:text-indigo-300" onClick={() => { setView('register'); setErr(''); setInfo('') }}>{t.otpChangeEmail}</button>
               </div>
@@ -167,9 +184,9 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
               <form onSubmit={forgot} className="space-y-4 pt-4">
                 <h2 className="font-display text-2xl font-bold">🔑 {t.forgotTitle}</h2>
                 <p className="text-sm text-slate-600 dark:text-slate-300">{t.forgotInfo}</p>
-                <Field id="auth-email" label={t.email} icon="✉️"><input id="auth-email" className={inp('pl-11')} type="email" required value={f.email} onChange={set('email')} autoComplete="email" autoFocus /></Field>
+                <Field id="auth-email" label={t.email} icon="✉️"><input id="auth-email" className={inp('!pl-11')} type="email" required value={f.email} onChange={set('email')} autoComplete="email" autoFocus /></Field>
                 {msgs}
-                <button className="btn w-full" disabled={busy || !EMAIL_RE.test(f.email)}>{busy ? '…' : t.sendCode}</button>
+                <button className="btn w-full" disabled={loading || !EMAIL_RE.test(f.email)}>{loading ? '…' : t.sendCode}</button>
                 <button type="button" className="text-sm font-semibold text-indigo-600 underline dark:text-indigo-300" onClick={() => { setView('login'); setErr('') }}>{t.backLogin}</button>
               </form>
             ) : view === 'reset' ? (
@@ -183,11 +200,11 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
                 {passwordField('auth-newpass', t.newPass, 'password', 'new-password')}
                 {strengthMeter}
                 <Field id="auth-confirm" label={t.confirmLbl} icon="🔒" hint={mismatch ? t.pwMismatch : matches ? t.pwMatch : ''} tone={mismatch ? 'bad' : 'ok'}>
-                  <input id="auth-confirm" className={inp('pl-11')} type={show ? 'text' : 'password'} required value={f.confirm} onChange={set('confirm')} autoComplete="new-password" />
+                  <input id="auth-confirm" className={inp('!pl-11 !pr-11')} type={show ? 'text' : 'password'} required value={f.confirm} onChange={set('confirm')} autoComplete="new-password" />
                 </Field>
                 {msgs}
-                <button className="btn w-full" disabled={busy || !canReset}>{busy ? '…' : t.resetBtn}</button>
-                <button type="button" className="btn-ghost w-full text-sm" disabled={busy || cooldown > 0} onClick={resendReset}>{cooldown > 0 ? t.otpResendIn.replace('{s}', cooldown) : t.otpResend}</button>
+                <button className="btn w-full" disabled={loading || !canReset}>{loading ? '…' : t.resetBtn}</button>
+                <button type="button" className="btn-ghost w-full text-sm" disabled={loading || cooldown > 0} onClick={resendReset}>{cooldown > 0 ? t.otpResendIn.replace('{s}', cooldown) : t.otpResend}</button>
                 <button type="button" className="text-sm font-semibold text-indigo-600 underline dark:text-indigo-300" onClick={() => { setView('login'); setErr(''); setInfo('') }}>{t.backLogin}</button>
               </form>
             ) : (
@@ -203,22 +220,22 @@ export default function Auth({ lang, open, mode: startMode, onClose, onSubmit, o
                   ))}
                 </div>
                 {view === 'register' && (<>
-                  <Field id="auth-name" label={t.nameLbl} icon="🙂"><input id="auth-name" className={inp('pl-11')} required maxLength={40} value={f.name} onChange={set('name')} autoComplete="name" /></Field>
+                  <Field id="auth-name" label={t.nameLbl} icon="🙂"><input id="auth-name" className={inp('!pl-11')} required maxLength={40} value={f.name} onChange={set('name')} autoComplete="name" /></Field>
                   <Field id="auth-username" label={t.usernameLbl} icon="@" hint={unameHint} tone={unameTone}>
-                    <input id="auth-username" className={inp('pl-11')} required maxLength={20} value={f.username} onChange={(e) => setF((x) => ({ ...x, username: e.target.value.replace(/[^A-Za-z0-9_]/g, '') }))} autoComplete="username" autoCapitalize="none" spellCheck="false" />
+                    <input id="auth-username" className={inp('!pl-11')} required maxLength={20} value={f.username} onChange={(e) => setF((x) => ({ ...x, username: e.target.value.replace(/[^A-Za-z0-9_]/g, '') }))} autoComplete="username" autoCapitalize="none" spellCheck="false" />
                   </Field>
                 </>)}
-                <Field id="auth-email" label={t.email} icon="✉️"><input id="auth-email" className={inp('pl-11')} type="email" required value={f.email} onChange={set('email')} autoComplete="email" /></Field>
+                <Field id="auth-email" label={t.email} icon="✉️"><input id="auth-email" className={inp('!pl-11')} type="email" required value={f.email} onChange={set('email')} autoComplete="email" /></Field>
                 {passwordField('auth-pass', t.pass, 'password', view === 'login' ? 'current-password' : 'new-password')}
                 {view === 'register' && (<>
                   {strengthMeter}
                   <Field id="auth-confirm" label={t.confirmLbl} icon="🔒" hint={mismatch ? t.pwMismatch : matches ? t.pwMatch : ''} tone={mismatch ? 'bad' : 'ok'}>
-                    <input id="auth-confirm" className={inp('pl-11')} type={show ? 'text' : 'password'} required value={f.confirm} onChange={set('confirm')} autoComplete="new-password" />
+                    <input id="auth-confirm" className={inp('!pl-11 !pr-11')} type={show ? 'text' : 'password'} required value={f.confirm} onChange={set('confirm')} autoComplete="new-password" />
                   </Field>
                 </>)}
                 {view === 'login' && <button type="button" className="text-sm font-semibold text-indigo-600 hover:underline dark:text-indigo-300" onClick={() => { setView('forgot'); setErr(''); setInfo('') }}>{t.forgot}</button>}
                 {msgs}
-                <button className="btn w-full !py-3" disabled={busy || (view === 'register' && !canRegister)}>{busy ? '…' : view === 'login' ? t.login : t.reg}</button>
+                <button className="btn w-full !py-3" disabled={loading || (view === 'register' && !canRegister)}>{loading ? '…' : view === 'login' ? t.login : t.reg}</button>
               </form>
             )}
           </motion.div>

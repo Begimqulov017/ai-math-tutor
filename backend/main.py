@@ -447,10 +447,10 @@ async def tts(b: TtsIn, request: Request):
 
 
 @app.post("/api/auth/login")
-def login(b: LoginIn, request: Request):
+async def login(b: LoginIn, request: Request):
     rate_limit(request, "auth", 10)
     row = db.user_by_email(b.email.strip().lower())
-    if not row or not verify_password(b.password, row["pw_hash"]):
+    if not row or not await asyncio.to_thread(verify_password, b.password, row["pw_hash"]):
         raise HTTPException(401, "Wrong email or password")
     return {"token": make_token(row["id"]), "user": db.get_user(row["id"])}
 
@@ -571,7 +571,7 @@ async def chat(body: ChatIn, request: Request):
     rate_limit(request, "llm", 20)
     if not balancer.total:
         return {"reply": "Demo mode: add GEMINI_API_KEY_1 to backend/.env to chat with the tutor."}
-    system = (f"You are a patient math tutor. Answer in {LANGS[body.lang]}, briefly, inline math in $...$. "
+    system = (f"You are a patient math tutor. Answer in {LANGS[body.lang]}, briefly and concisely (2-4 sentences max), inline math in $...$. "
               "Current context: " + json.dumps(body.context, ensure_ascii=False)[:4000])
     hist = "\n".join(f"{m.get('role')}: {str(m.get('text'))[:800]}" for m in body.history[-8:])
     return {"reply": await gemini([{"text": f"{hist}\nstudent: {body.message}"}], system, as_json=False)}
@@ -680,7 +680,7 @@ async def thread_send(tid: int, b: MsgIn, request: Request, uid: int = Depends(r
         try:
             plan = (db.get_user(uid) or {}).get("plan", "free")
             memory = th["topic_summary"] or "A free math conversation (no particular problem yet)."
-            system = (f"You are a patient math tutor. Answer in {LANGS[b.lang]}, briefly and clearly, inline math in $...$. "
+            system = (f"You are a patient math tutor. Answer in {LANGS[b.lang]}, briefly and clearly (2-4 sentences max), inline math in $...$. "
                       "This conversation belongs to one topic; remember it and everything said earlier in it.\n"
                       f"Topic of this conversation:\n{memory}")
             ctx = json.dumps(b.context, ensure_ascii=False)[:1500] if b.context else ""

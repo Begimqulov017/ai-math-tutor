@@ -1,13 +1,19 @@
-"""Text -> natural spoken text -> neural voice (edge-tts).
+"""Text -> natural spoken text -> neural voice (OpenAI tts-1 with nova/alloy or edge-tts fallback).
 
-math_to_spoken_text() turns LaTeX / math symbols into words, synthesize() returns MP3 bytes (with a small LRU cache)."""
+math_to_spoken_text() turns LaTeX / math symbols into words, synthesize() returns MP3 bytes (with aggressive LRU memory + DB cache)."""
 import asyncio
+import base64
 import hashlib
 import logging
+import os
 import re
 from collections import OrderedDict
 
+import httpx
 from fastapi import HTTPException
+
+import config
+import db
 
 log = logging.getLogger("mathtutor.tts")
 
@@ -20,23 +26,27 @@ _W = {
                eq=" teng ", ne=" teng emas ", lt=" kichik ", gt=" katta ", le=" kichik yoki teng ", ge=" katta yoki teng ",
                approx=" taxminan teng ", pm=" plyus minus ", pi=" pi ", inf=" cheksizlik ", theta=" teta ", alpha=" alfa ", beta=" beta ",
                sin=" sinus ", cos=" kosinus ", tan=" tangens ", cot=" kotangens ", log=" logarifm ", ln=" natural logarifm ",
-               angle=" burchak ", triangle=" uchburchak ", deg=" gradus ", integral=" integral ", sum=" yig'indi ", abs=" modul "),
+               angle=" burchak ", triangle=" uchburchak ", deg=" gradus ", integral=" integral ", sum=" yig'indi ", abs=" modul ",
+               det=" determinant ", matrix=" matritsa "),
     "ru": dict(sqrt="корень из ", nroot="корень {n}-й степени из ", sq=" в квадрате", cube=" в кубе", pow=" в степени {n} ", sub=" с индексом ",
                frac="дробь ", over=" делённое на ", plus=" плюс ", minus=" минус ", neg=" минус ", times=" умножить на ", div=" разделить на ",
                eq=" равно ", ne=" не равно ", lt=" меньше ", gt=" больше ", le=" меньше или равно ", ge=" больше или равно ",
                approx=" приблизительно равно ", pm=" плюс минус ", pi=" пи ", inf=" бесконечность ", theta=" тета ", alpha=" альфа ", beta=" бета ",
                sin=" синус ", cos=" косинус ", tan=" тангенс ", cot=" котангенс ", log=" логарифм ", ln=" натуральный логарифм ",
-               angle=" угол ", triangle=" треугольник ", deg=" градусов ", integral=" интеграл ", sum=" сумма ", abs=" модуль "),
+               angle=" угол ", triangle=" треугольник ", deg=" градусов ", integral=" интеграл ", sum=" сумма ", abs=" модуль ",
+               det=" определитель ", matrix=" матрица "),
     "en": dict(sqrt="square root of ", nroot="{n}th root of ", sq=" squared", cube=" cubed", pow=" to the power {n} ", sub=" sub ",
                frac="fraction ", over=" over ", plus=" plus ", minus=" minus ", neg=" minus ", times=" times ", div=" divided by ",
                eq=" equals ", ne=" does not equal ", lt=" less than ", gt=" greater than ", le=" less than or equal to ", ge=" greater than or equal to ",
                approx=" approximately equals ", pm=" plus or minus ", pi=" pi ", inf=" infinity ", theta=" theta ", alpha=" alpha ", beta=" beta ",
                sin=" sine ", cos=" cosine ", tan=" tangent ", cot=" cotangent ", log=" log ", ln=" natural log ",
-               angle=" angle ", triangle=" triangle ", deg=" degrees ", integral=" integral ", sum=" sum ", abs=" absolute value "),
+               angle=" angle ", triangle=" triangle ", deg=" degrees ", integral=" integral ", sum=" sum ", abs=" absolute value ",
+               det=" determinant ", matrix=" matrix "),
 }
 _CMD = {"pi": "pi", "infty": "inf", "theta": "theta", "alpha": "alpha", "beta": "beta", "pm": "pm", "cdot": "times", "times": "times",
         "div": "div", "le": "le", "leq": "le", "ge": "ge", "geq": "ge", "ne": "ne", "neq": "ne", "approx": "approx", "sin": "sin", "cos": "cos",
-        "tan": "tan", "tg": "tan", "cot": "cot", "log": "log", "ln": "ln", "angle": "angle", "triangle": "triangle", "int": "integral", "sum": "sum"}
+        "tan": "tan", "tg": "tan", "cot": "cot", "ctg": "cot", "log": "log", "ln": "ln", "angle": "angle", "triangle": "triangle",
+        "int": "integral", "sum": "sum", "det": "det"}
 # commands that only format and say nothing
 _IGNORE = {"left", "right", "hl", "text", "mathrm", "mathbf", "mathit", "operatorname", "displaystyle", "quad", "qquad", "big", "Big", "bigg", "limits"}
 
@@ -76,8 +86,17 @@ def _fractions(s: str, w: dict) -> str:
         s = s[:m.start()] + f" {w['frac']}{a}{w['over']}{b} " + s[i:]
 
 
+def _matrices(s: str, w: dict) -> str:
+    def repl(m):
+        inner = m.group(1)
+        rows = [", ".join(c.strip() for c in r.split("&") if c.strip()) for r in re.split(r"\\\\", inner) if r.strip()]
+        return f" {w['matrix']} " + "; ".join(rows) + " "
+    return re.sub(r"\\begin\{(?:pmatrix|bmatrix|vmatrix|matrix)\}([\s\S]*?)\\end\{(?:pmatrix|bmatrix|vmatrix|matrix)\}", repl, s)
+
+
 def _convert(s: str, lang: str, math: bool) -> str:
     w = _W[lang]
+    s = _matrices(s, w)
     # minus signs first, while the neighbours are still raw symbols
     if math:
         s = _UNARY.sub(lambda m: m.group(1) + _NEG, s)
@@ -141,8 +160,25 @@ def _clip(s: str, limit: int) -> str:
 # ---------------------------------------------------------------- synthesis + cache
 _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _cache_size = 0
-MAX_CACHE_BYTES = 40 * 1024 * 1024
-_sem = asyncio.Semaphore(4)  # at most 4 syntheses at the same time
+MAX_CACHE_BYTES = 60 * 1024 * 1024
+_sem = asyncio.Semaphore(6)  # concurrent TTS synthesis requests
+
+
+async def _openai_tts(text: str, api_key: str) -> bytes:
+    """Natural human-like voice via OpenAI TTS (`tts-1` with `nova` / `alloy` voice)."""
+    voice = getattr(config, "OPENAI_TTS_VOICE", "nova") or "nova"
+    if voice not in ("nova", "alloy", "shimmer", "echo", "fable", "onyx"):
+        voice = "nova"
+    model = getattr(config, "OPENAI_TTS_MODEL", "tts-1") or "tts-1"
+    async with httpx.AsyncClient(timeout=15) as client:
+        r = await client.post(
+            "https://api.openai.com/v1/audio/speech",
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json={"model": model, "voice": voice, "input": text, "response_format": "mp3"},
+        )
+        if r.status_code != 200 or not r.content:
+            raise RuntimeError(f"OpenAI TTS HTTP {r.status_code}")
+        return r.content
 
 
 async def _collect(edge_tts, text: str, voice: str) -> bytes:
@@ -155,26 +191,63 @@ async def _collect(edge_tts, text: str, voice: str) -> bytes:
     return bytes(buf)
 
 
-async def synthesize(text: str, lang: str) -> bytes:
-    """MP3 bytes. The same sentence is synthesized once and then served from memory."""
+def _store_in_memory(key: str, audio: bytes) -> None:
     global _cache_size
-    voice = VOICES.get(lang, VOICES["en"])
-    key = hashlib.sha256(f"{voice}|{text}".encode()).hexdigest()
-    if key in _cache:
-        _cache.move_to_end(key)
-        return _cache[key]
-    try:
-        import edge_tts
-    except ImportError:
-        raise HTTPException(503, {"code": "tts_unavailable", "message": "Voice service is not installed on the server"})
-    async with _sem:
-        try:
-            audio = await asyncio.wait_for(_collect(edge_tts, text, voice), timeout=25)
-        except Exception as e:  # the Edge service is an unofficial endpoint: it may be slow, blocked or changed
-            log.warning("TTS failed: %s", e.__class__.__name__)
-            raise HTTPException(502, {"code": "tts_failed", "message": "Voice service is temporarily unavailable"})
     _cache[key] = audio
     _cache_size += len(audio)
     while _cache_size > MAX_CACHE_BYTES and _cache:
         _cache_size -= len(_cache.popitem(last=False)[1])
+
+
+async def synthesize(text: str, lang: str) -> bytes:
+    """MP3 bytes. Cached in memory (and DB when available) so repeated playback is instantaneous."""
+    voice = VOICES.get(lang, VOICES["en"])
+    openai_key = os.getenv("OPENAI_API_KEY", "").strip() or getattr(config, "OPENAI_API_KEY", "")
+    provider = f"openai:{getattr(config, 'OPENAI_TTS_VOICE', 'nova')}" if openai_key else voice
+    key = hashlib.sha256(f"{provider}|{text}".encode()).hexdigest()
+
+    # 1. Fast in-memory LRU hit
+    if key in _cache:
+        _cache.move_to_end(key)
+        return _cache[key]
+
+    # 2. Persistent DB cache hit (if not using mocked edge_tts in unit tests)
+    db_key = f"tts:{key[:48]}"
+    try:
+        cached_obj = db.cache_get(db_key, touch=False)
+        if isinstance(cached_obj, dict) and cached_obj.get("b64"):
+            audio = base64.b64decode(cached_obj["b64"])
+            _store_in_memory(key, audio)
+            return audio
+    except Exception:
+        pass
+
+    audio: bytes | None = None
+    # 3. Try OpenAI TTS (`tts-1` with `nova`/`alloy`) first if OPENAI_API_KEY is configured
+    if openai_key:
+        async with _sem:
+            try:
+                audio = await _openai_tts(text, openai_key)
+            except Exception as e:
+                log.warning("OpenAI TTS failed (%s), falling back to neural edge-tts", e.__class__.__name__)
+
+    # 4. Fallback to neural edge-tts voice
+    if audio is None:
+        try:
+            import edge_tts
+        except ImportError:
+            raise HTTPException(503, {"code": "tts_unavailable", "message": "Voice service is not installed on the server"})
+        async with _sem:
+            try:
+                audio = await asyncio.wait_for(_collect(edge_tts, text, voice), timeout=20)
+            except Exception as e:
+                log.warning("TTS failed: %s", e.__class__.__name__)
+                raise HTTPException(502, {"code": "tts_failed", "message": "Voice service is temporarily unavailable"})
+
+    _store_in_memory(key, audio)
+    try:
+        if len(audio) > 64:  # persist real audio clips to DB cache for instant future playback
+            db.cache_put(db_key, lang, {"b64": base64.b64encode(audio).decode("ascii")})
+    except Exception:
+        pass
     return audio

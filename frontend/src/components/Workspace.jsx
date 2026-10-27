@@ -33,7 +33,7 @@ export default function Workspace({ lang, user, title, onBack, onHistory, onProg
       initial={{ opacity: 0, y: 28 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 28 }} transition={{ duration: 0.3, ease: 'easeOut' }}>
       <div className="print:hidden flex items-center gap-2 px-3 md:px-6 py-2 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur">
         <button className="btn-ghost text-sm font-bold" onClick={onBack}>← {t.back}</button>
-        <div className="flex-1 min-w-0 overflow-hidden whitespace-nowrap text-ellipsis text-base md:text-lg px-2"><Tex tex={title} /></div>
+        <div className="flex-1 min-w-0 overflow-x-auto no-scrollbar whitespace-nowrap text-base md:text-lg px-2"><Tex tex={title} /></div>
         {user && (
           <span className={`hidden sm:inline-block rounded-xl border px-3 py-1.5 text-sm font-bold ${tk <= 0 ? 'border-rose-400 text-rose-600' : 'border-amber-400 text-amber-700 dark:text-amber-300'}`}>
             ⚡ {tk > user.daily_tokens ? tk : `${tk}/${user.daily_tokens}`}

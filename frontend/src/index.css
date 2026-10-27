@@ -55,6 +55,15 @@ body::before {
 .gradient-text { @apply bg-gradient-to-r from-indigo-600 via-violet-600 to-fuchsia-500 bg-clip-text text-transparent; }
 .lift { @apply transition duration-200 hover:-translate-y-1 hover:shadow-xl; }
 
+/* hide ugly horizontal scrollbars on formula containers while keeping overflow accessible */
+.no-scrollbar::-webkit-scrollbar { display: none; }
+.no-scrollbar { -ms-overflow-style: none; scrollbar-width: none; }
+
+/* clean responsive KaTeX scaling inside cards */
+.katex-wrap { max-width: 100%; display: inline-block; vertical-align: middle; }
+.katex-display { margin: 0.35em 0 !important; overflow-x: auto; overflow-y: hidden; scrollbar-width: none; }
+.katex-display::-webkit-scrollbar { display: none; }
+
 @keyframes float { 0%, 100% { transform: translateY(0) rotate(0); } 50% { transform: translateY(-14px) rotate(6deg); } }
 .animate-float { animation: float 7s ease-in-out infinite; }
 

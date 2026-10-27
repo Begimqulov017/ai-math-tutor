@@ -74,8 +74,8 @@ export default function Friends({ lang, user, onLogin }) {
           <form onSubmit={send} className="glass flex flex-wrap items-end gap-3 p-5">
             <div className="min-w-48 flex-1">
               <label htmlFor="friend-name" className="text-sm font-semibold">{t.frAdd}</label>
-              <div className="relative mt-1.5"><span aria-hidden="true" className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400">@</span>
-                <input id="friend-name" className="field pl-9" placeholder={t.frPh} value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_@]/g, ''))} maxLength={21} autoCapitalize="none" /></div>
+              <div className="relative mt-1.5 flex items-center"><span aria-hidden="true" className="pointer-events-none absolute inset-y-0 left-0 flex w-10 items-center justify-center text-slate-400">@</span>
+                <input id="friend-name" className="field !pl-10" placeholder={t.frPh} value={name} onChange={(e) => setName(e.target.value.replace(/[^A-Za-z0-9_@]/g, ''))} maxLength={21} autoCapitalize="none" /></div>
             </div>
             <button className="btn" disabled={busy || !name.trim()}>{t.frSend}</button>
             {msg && <p role={msg.ok ? 'status' : 'alert'} className={`w-full text-sm font-semibold ${msg.ok ? 'text-emerald-600' : 'text-rose-600'}`}>{msg.text}</p>}

@@ -1,4 +1,4 @@
-"""Gemini access: round-robin key balancer with failover + tolerant JSON parsing."""
+"""Gemini access: round-robin key balancer with failover + low-latency JSON generation."""
 import asyncio
 import json
 import logging
@@ -13,6 +13,8 @@ from fastapi import HTTPException
 import config
 
 log = logging.getLogger("mathtutor.llm")
+
+
 def _url(model: str) -> str:
     return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
@@ -72,36 +74,59 @@ class APIKeyBalancer:
 balancer = APIKeyBalancer()
 
 
+def _gen_config(as_json: bool, model: str) -> dict:
+    """Low-latency generationConfig: disable thinking overhead on 2.5 Flash so responses return in 1-2s."""
+    cfg: dict = {
+        "temperature": 0.2,
+        "maxOutputTokens": 2048 if as_json else 600,
+    }
+    if as_json:
+        cfg["responseMimeType"] = "application/json"
+    if "2.5" in (model or ""):
+        cfg["thinkingConfig"] = {"thinkingBudget": 0}
+    return cfg
+
+
 async def gemini(parts: list, system: str, as_json: bool, history: list | None = None, model: str | None = None) -> str:
     if not balancer.total:
         raise HTTPException(503, "AI service is not configured")
-    body = {
-        "systemInstruction": {"parts": [{"text": system}]},
-        "contents": [*(history or []), {"role": "user", "parts": parts}],
-        "generationConfig": {"temperature": 0.3, **({"responseMimeType": "application/json"} if as_json else {})},
-    }
-    url = _url(model or config.MODEL)
-    async with httpx.AsyncClient(timeout=120) as client:
-        for key in balancer.order():
-            tag = "..." + key[-4:]
-            try:
-                r = await client.post(url, params={"key": key}, json=body)
-            except httpx.HTTPError as e:  # network problem: try the next key
-                log.warning("key %s network error %s", tag, e.__class__.__name__)
-                balancer.rest(key, 10)
-                continue
-            if r.status_code == 200:
+    primary_model = model or config.MODEL
+    models_to_try = [primary_model]
+    if getattr(config, "FALLBACK_MODEL", "") and config.FALLBACK_MODEL not in models_to_try:
+        models_to_try.append(config.FALLBACK_MODEL)
+
+    async with httpx.AsyncClient(timeout=30) as client:
+        for cur_model in models_to_try:
+            body = {
+                "systemInstruction": {"parts": [{"text": system}]},
+                "contents": [*(history or []), {"role": "user", "parts": parts}],
+                "generationConfig": _gen_config(as_json, cur_model),
+            }
+            url = _url(cur_model)
+            for key in balancer.order():
+                tag = "..." + key[-4:]
                 try:
-                    out = r.json()["candidates"][0]["content"]["parts"]
-                except (KeyError, IndexError, ValueError):
-                    log.warning("key %s empty reply: %s", tag, r.text[:150])
+                    r = await client.post(url, params={"key": key}, json=body)
+                except httpx.HTTPError as e:  # network problem: try the next key
+                    log.warning("key %s network error %s", tag, e.__class__.__name__)
+                    balancer.rest(key, 10)
                     continue
-                return "".join(p.get("text", "") for p in out if not p.get("thought"))
-            log.warning("key %s failed: %s %s", tag, r.status_code, r.text[:200])
-            if r.status_code in COOLDOWN:
-                balancer.rest(key, COOLDOWN[r.status_code])
-                continue
-            raise HTTPException(502, f"AI request was rejected ({r.status_code})")
+                if r.status_code == 200:
+                    try:
+                        out = r.json()["candidates"][0]["content"]["parts"]
+                    except (KeyError, IndexError, ValueError):
+                        log.warning("key %s empty reply: %s", tag, r.text[:150])
+                        continue
+                    return "".join(p.get("text", "") for p in out if not p.get("thought"))
+                # If the model doesn't exist or doesn't support thinkingConfig, fall back to next model
+                if r.status_code in (400, 404) and cur_model != models_to_try[-1]:
+                    log.warning("model %s returned %s, falling back to %s", cur_model, r.status_code, models_to_try[-1])
+                    break
+                log.warning("key %s failed: %s %s", tag, r.status_code, r.text[:200])
+                if r.status_code in COOLDOWN:
+                    balancer.rest(key, COOLDOWN[r.status_code])
+                    continue
+                raise HTTPException(502, f"AI request was rejected ({r.status_code})")
     raise HTTPException(503, "AI is busy right now, please try again in a moment")
 
 

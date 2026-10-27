@@ -1,8 +1,7 @@
 import { T } from '../lib/i18n'
 import { Tex } from './Tex'
 
-// face = how the key looks (LaTeX), ins = what is inserted, back = how many characters the cursor steps back
-// (so it lands inside the braces: \frac{|}{}).
+// face = how the key looks (LaTeX), ins = what is inserted visually into LiveMathField
 export const KEYS = [
   { face: '\\sqrt{x}', ins: '\\sqrt{}', back: 1, title: 'sqrt' },
   { face: '\\sqrt[n]{x}', ins: '\\sqrt[]{}', back: 3, title: 'nth root' },
@@ -10,6 +9,7 @@ export const KEYS = [
   { face: 'x^n', ins: '^{}', back: 1, title: 'power' },
   { face: 'x_n', ins: '_{}', back: 1, title: 'index' },
   { face: '\\frac{a}{b}', ins: '\\frac{}{}', back: 3, title: 'fraction' },
+  { face: '\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}', ins: '\\begin{pmatrix}&\\\\&\\end{pmatrix}', back: 14, title: 'matrix' },
   { face: '(\\,)', ins: '()', back: 1, title: 'brackets' },
   { face: '|x|', ins: '||', back: 1, title: 'absolute value' },
   { face: '\\pi', ins: '\\pi ', title: 'pi' },
@@ -48,7 +48,7 @@ export default function MathKeypad({ lang, onInsert }) {
             onMouseDown={(e) => e.preventDefault() /* keep the cursor in the input */}
             onClick={() => onInsert(k.ins, k.back || 0)}
             className="min-w-10 h-10 px-2 grid place-items-center rounded-lg border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-800 hover:bg-indigo-50 dark:hover:bg-indigo-950 hover:border-indigo-400 active:scale-95 transition focus-visible:outline-2 focus-visible:outline-indigo-400">
-            <Tex tex={k.face} />
+            <span className={k.title === 'matrix' ? 'scale-75' : ''}><Tex tex={k.face} /></span>
           </button>
         ))}
       </div>

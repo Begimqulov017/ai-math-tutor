@@ -18,7 +18,14 @@ def _int(name: str, default: int) -> int:
         return default
 
 
-MODEL = os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+# Fastest low-latency Gemini Flash model (gemini-2.5-flash or gemini-2.0-flash)
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
+FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+
+# Optional OpenAI API key for ultra-natural TTS (tts-1 with nova / alloy voice)
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+OPENAI_TTS_MODEL = os.getenv("OPENAI_TTS_MODEL", "tts-1").strip() or "tts-1"
+OPENAI_TTS_VOICE = os.getenv("OPENAI_TTS_VOICE", "nova").strip() or "nova"
 
 # PostgreSQL (Neon, Supabase, ...) when DATABASE_URL is set, otherwise a local SQLite file
 DATABASE_URL = os.getenv("DATABASE_URL", "").strip()
@@ -73,6 +80,6 @@ PLAN_DAILY = {"free": DAILY_TOKENS, "premium": _int("PREMIUM_DAILY_TOKENS", 200)
 PAID_PLANS = ("premium", "vip")
 CHAT_MESSAGES_PER_TOKEN = max(1, _int("CHAT_MESSAGES_PER_TOKEN", 3))  # every 3rd chat message costs 1 token
 # "Priority AI responses": every plan has its own lane of simultaneous AI calls, so free users can never queue paying ones.
-LLM_LANE_SIZE = max(1, _int("LLM_LANE_SIZE", 4))
+LLM_LANE_SIZE = max(1, _int("LLM_LANE_SIZE", 6))
 PREMIUM_MODEL = os.getenv("GEMINI_MODEL_PREMIUM", "").strip() or MODEL  # optional stronger model for paying users
 VIP_MODEL = os.getenv("GEMINI_MODEL_VIP", "").strip() or PREMIUM_MODEL

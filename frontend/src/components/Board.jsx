@@ -153,11 +153,11 @@ export default function Board({ lang, data, step }) {
   return (
     <section className="board rounded-2xl p-5 md:p-6 text-slate-100 bg-slate-900 border-4 border-slate-700 shadow-inner" aria-label={t.board}>
       <h3 className="font-bold mb-3 text-slate-300">🧑‍🏫 {t.board}</h3>
-      <div className="text-2xl overflow-x-auto"><Tex tex={data.problem} block /></div>
+      <div className="text-2xl overflow-x-auto no-scrollbar"><Tex tex={data.problem} block /></div>
       {showDiagram && <Safe><div className="mt-3"><Diagram spec={data.geometry_svg_or_coords} focus={s?.focus || []} /></div></Safe>}
       {data.graph && <Safe><div className="mt-3"><Graph spec={data.graph} /></div></Safe>}
       {s && (
-        <div className="mt-3 pt-3 border-t border-dashed border-slate-600 text-xl overflow-x-auto">
+        <div className="mt-3 pt-3 border-t border-dashed border-slate-600 text-xl overflow-x-auto no-scrollbar">
           <span className="text-sm text-slate-400 mr-2">{step + 1}/{data.steps.length}</span>
           <Tex tex={s.latex} block />
         </div>

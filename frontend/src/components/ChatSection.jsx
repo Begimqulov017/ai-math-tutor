@@ -109,7 +109,7 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
     <section id="chat-section" className="print:hidden glass p-3 md:p-5 min-h-[85vh] flex flex-col" aria-label={t.chatTitle}>
       <div className="flex flex-wrap items-center gap-2 mb-3">
         <h3 className="font-display text-xl text-ink dark:text-indigo-100">💬 {t.chatTitle}</h3>
-        {topic && <span className="flex-1 min-w-0 overflow-hidden whitespace-nowrap text-ellipsis text-sm text-slate-500"><Tex tex={topic} /></span>}
+        {topic && <span className="flex-1 min-w-0 overflow-x-auto no-scrollbar whitespace-nowrap text-sm text-slate-500"><Tex tex={topic} /></span>}
         <button className="btn-ghost text-sm lg:hidden" onClick={() => setShowList(!showList)} aria-expanded={showList}>☰ {t.threads}</button>
       </div>
       {!loggedIn && (
@@ -123,7 +123,7 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
           <button className="btn w-full text-sm" onClick={newChat}>＋ {t.newChat}</button>
           {loggedIn && threads.map((th) => (
             <div key={th.id} className={`flex items-center gap-1 rounded-lg border px-2 py-1.5 ${th.id === activeId ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-800'}`}>
-              <button className="flex-1 min-w-0 text-left text-sm overflow-hidden whitespace-nowrap text-ellipsis" onClick={() => { setActiveId(th.id); setShowList(false) }} title={th.title}>
+              <button className="flex-1 min-w-0 text-left text-sm overflow-x-auto no-scrollbar whitespace-nowrap" onClick={() => { setActiveId(th.id); setShowList(false) }} title={th.title}>
                 <Tex tex={th.title} />
               </button>
               <button className="text-xs text-rose-600" onClick={() => removeThread(th.id)} aria-label={t.delThread} title={t.delThread}>✕</button>
@@ -135,7 +135,7 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
           <div ref={box} className="flex-1 overflow-y-auto max-h-[65vh] space-y-2 pr-1" aria-live="polite">
             {messages.length === 0 && <p className="text-sm text-slate-500 py-6 text-center">{t.chatEmpty}</p>}
             {messages.map((m) => (
-              <div key={m.id} className={`max-w-[88%] rounded-2xl px-3 py-2 ${m.role === 'user' ? 'ml-auto bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>
+              <div key={m.id} className={`max-w-[88%] rounded-2xl px-3 py-2 overflow-x-auto no-scrollbar ${m.role === 'user' ? 'ml-auto bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800'}`}>
                 <p className="whitespace-pre-wrap"><Rich text={m.content} /></p>
                 {m.role !== 'user' && (
                   <button className="mt-1 text-xs font-bold text-indigo-600 dark:text-indigo-300 underline" title={t.listenTitle} aria-label={t.listenTitle}

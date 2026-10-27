@@ -21,7 +21,7 @@ export default function History({ lang, open, onClose, items, activeId, onOpen, 
               {items.map((i) => (
                 <li key={i.id} className={`rounded-xl border p-3 ${i.id === activeId ? 'border-indigo-500 bg-indigo-50 dark:bg-indigo-950/40' : 'border-slate-200 dark:border-slate-800'}`}>
                   <button className="w-full text-left" onClick={() => onOpen(i)}>
-                    <div className="overflow-x-auto"><Tex tex={i.data?.problem || i.text} /></div>
+                    <div className="overflow-x-auto no-scrollbar"><Tex tex={i.data?.problem || i.text} /></div>
                     <div className="text-xs text-slate-500 mt-1">
                       {[i.data?.topic?.topic, new Date(i.ts).toLocaleString()].filter(Boolean).join(' • ')}
                       {i.chat?.length ? ` • 💬 ${i.chat.length}` : ''}
