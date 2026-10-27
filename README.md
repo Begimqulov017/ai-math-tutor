@@ -110,6 +110,8 @@ cd backend
 python tests/test_features.py     # tokenlar, kunlik tiklanish, admin, suhbat xotirasi
 python tests/test_migration.py    # eski bazani yangilash
 python tests/test_tts_otp.py      # nutq normalizatori, /api/tts, email kod oqimi
+python tests/test_plans_social.py # username, parolni tiklash, tariflar, admin tokenlari, chat narxi, do'stlar
+python tests/test_migration2.py   # oldingi versiyadan yangilash (username, bonus tokenlar, tariflar)
 ```
 
 ## Neyron ovoz (UZ / RU / EN)
@@ -130,3 +132,25 @@ python tests/test_tts_otp.py      # nutq normalizatori, /api/tts, email kod oqim
 `BREVO_API_KEY=...` va `MAIL_FROM=<tasdiqlangan manzil>` ni Render **Environment** ga qo'ying. Bepul tarifdagi kunlik xat chegarasini Brevo saytidan tekshiring.
 
 **Lokal sinov:** `.env` ga `EMAIL_DEV_LOG=1` qo'ying — kod backend terminalida `VERIFICATION CODE for ...: 123456` ko'rinishida chiqadi.
+
+## Tariflar (Premium / VIP)
+| | Bepul | Premium (20 000 so'm/oy) | VIP (50 000 so'm/oy) |
+|---|---|---|---|
+| Kunlik token | 50 | 200 | 500 |
+| AI navbati | umumiy | **alohida navbat** | **o'z navbati** |
+| Tahlil | oddiy + geometriya chizmasi | + funksiya grafiklari, boyitilgan geometriya | Premium + barcha elit imkoniyatlar, VIP belgisi |
+
+- **To'lov qo'lda:** foydalanuvchi narxlar oynasidagi ko'rsatma bo'yicha Telegramda `@begimqulov_017` ga yozadi, admin **Admin panel → Tarifni boshqarish** orqali tarifni faollashtiradi (kunlar soni bilan; `0` = muddatsiz). Qayta faollashtirish muddatni uzaytiradi. Muddati tugagan tarif o'zi bepulga qaytadi.
+- **Ustuvor AI:** har bir tarifning AI chaqiruvlari uchun alohida "yo'lak" (`LLM_LANE_SIZE`) bor, shuning uchun band paytda bepul foydalanuvchilar to'lovchilarni to'xtatib qo'ya olmaydi. Xohlasangiz to'lovchilar uchun kuchliroq model ham berish mumkin: `GEMINI_MODEL_PREMIUM`, `GEMINI_MODEL_VIP`.
+- **Chat narxi:** har 3-xabar (barcha suhbatlar bo'yicha sanaladi) 1 token. AI xato bersa xabar sanalmaydi.
+- **Tokenlar:** kunlik hovuz tarif miqdoriga to'ldiriladi. Admin qo'shgan tokenlar **doimiy bonus** bo'lib, kunlik tiklanishda yo'qolmaydi va kunlik hovuzdan keyin sarflanadi. Admin ayirganda avval kunlik hovuz, keyin bonus kamayadi (0 dan pastga tushmaydi).
+
+## Hisob: username, parol, tiklash
+- Ro'yxatdan o'tishda **username** (3–20: a-z, 0-9, _) va parolni takrorlash majburiy (UI: kamida 8 belgi). Eski foydalanuvchilarga username emailidan avtomatik beriladi.
+- **Parolni unutdim:** `POST /api/auth/forgot` (javob har doim bir xil, hisob borligi oshkor bo'lmaydi) → emailga 6 xonali kod (Brevo) → `POST /api/auth/reset` kod + yangi parol. Parol yangilanganda **barcha eski sessiyalar tugaydi**.
+
+## Do'stlar
+So'rov yuborish / qabul qilish (username bo'yicha), do'stlar orasida XP va streak reytingi (global ro'yxat yo'q: begonalarga ko'rsatilmaydi), yutuqlar lentasi (streak 3/7/14/30..., XP 100/250/500..., daraja) va ulashish (Web Share / Telegram).
+
+## Mavzular
+`frontend/src/lib/curriculum.js` da 9 bo'lim va 26 mavzu. Har bir mavzu tayyor misol bilan to'liq dars ochadi (1 token, shu kuni qayta ochish bepul). Yangi mavzu qo'shish uchun shu faylga yozuv qo'shing.

@@ -22,6 +22,14 @@ Rules:
 - When is_geometry is true, "geometry_svg_or_coords" is: {"points":[{"name":"A","x":0,"y":0}],"segments":[{"from":"A","to":"B","label":"5 cm"}],"polygons":[["A","B","C"]],"circles":[{"center":"O","r":3,"label":"r"}],"rightAngles":[{"at":"B","a":"A","b":"C"}],"angles":[{"at":"A","a":"B","b":"C","label":"60°"}]} with realistic coordinates that match the given lengths and angles (for stereometry draw the most informative plane projection or section). Each step may carry "focus": names of the diagram points/segments it is about, e.g. ["AB","C"].
 - All text fields are written in the requested language; LaTeX stays universal."""
 
+# Added to the prompt for Premium / VIP users: function graphs and a richer geometry analysis
+ADVANCED = r"""
+ADVANCED ANALYSIS (paying user):
+- For problems about a function, equation or inequality in one variable (parabola, line, trigonometry, derivative ...) add a top-level key "graph": {"functions":[{"expr":"x^2-5*x+6","label":"y = x^2-5x+6"}],"xmin":-1,"xmax":6,"points":[{"x":2,"y":0,"label":"x1"}]}. "expr" may use only x, numbers, + - * / ^ ( ) and sin cos tan sqrt abs ln log exp pi. Mark roots, extrema and intersections in "points".
+- For geometry problems make the diagram richer: add auxiliary lines (heights, medians, bisectors, radii) as extra segments, label every known side with its length, put every known angle with its value into "angles", and mark right angles.
+- In "variations" also cover special cases and add one variation named after a typical mistake students make.
+"""
+
 DEMO = {
     "problem": "x^2 - 5x + 6 = 0",
     "topic": {"area": "Algebra", "topic": "Quadratic equations", "method": "Discriminant"},

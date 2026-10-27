@@ -67,3 +67,12 @@ SMTP_PORT = _int("SMTP_PORT", 587)
 SMTP_USER = os.getenv("SMTP_USER", "").strip()
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD", "")
 EMAIL_DEV_LOG = os.getenv("EMAIL_DEV_LOG", "").strip().lower() in ("1", "true", "yes", "on")
+
+# ---- subscription plans (activated manually by the admin; the contact is shown in the pricing window) ----
+PLAN_DAILY = {"free": DAILY_TOKENS, "premium": _int("PREMIUM_DAILY_TOKENS", 200), "vip": _int("VIP_DAILY_TOKENS", 500)}
+PAID_PLANS = ("premium", "vip")
+CHAT_MESSAGES_PER_TOKEN = max(1, _int("CHAT_MESSAGES_PER_TOKEN", 3))  # every 3rd chat message costs 1 token
+# "Priority AI responses": every plan has its own lane of simultaneous AI calls, so free users can never queue paying ones.
+LLM_LANE_SIZE = max(1, _int("LLM_LANE_SIZE", 4))
+PREMIUM_MODEL = os.getenv("GEMINI_MODEL_PREMIUM", "").strip() or MODEL  # optional stronger model for paying users
+VIP_MODEL = os.getenv("GEMINI_MODEL_VIP", "").strip() or PREMIUM_MODEL

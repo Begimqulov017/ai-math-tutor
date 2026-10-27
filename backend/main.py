@@ -13,16 +13,16 @@ from typing import Literal
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 import config
 import db
-from llm import balancer, gemini, parse_json
+from llm import balancer, gemini, lane, model_for, parse_json
 from mailer import MailFailed, MailNotConfigured, send_code
-from prompts import DEMO, LANGS, SCHEMA
+from prompts import ADVANCED, DEMO, LANGS, SCHEMA
 from speech import _clip, math_to_spoken_text, synthesize
-from security import (client_ip, hash_password, ip_bucket, ip_hash, is_loopback, make_admin_token, make_token, optional_user_id,
-                      rate_limit, require_admin, required_user_id, verify_password)
+from security import (client_ip, hash_password, ip_bucket, ip_hash, is_loopback, make_admin_token, make_token, optional_user,
+                      optional_user_id, rate_limit, require_admin, required_user_id, verify_password)
 
 log = logging.getLogger("mathtutor")
 Lang = Literal["uz", "ru", "en"]
@@ -110,13 +110,43 @@ class AdminLoginIn(BaseModel):
 
 
 class GrantIn(BaseModel):
-    amount: int = Field(ge=1, le=100_000)
+    amount: int = Field(ge=-100_000, le=100_000)  # positive = add tokens, negative = subtract
+
+    @field_validator("amount")
+    @classmethod
+    def _not_zero(cls, v: int) -> int:
+        if v == 0:
+            raise ValueError("amount must not be 0")
+        return v
+
+
+class PlanIn(BaseModel):
+    plan: Literal["free", "premium", "vip"]
+    days: int = Field(30, ge=0, le=3650)  # 0 = no end date
+
+
+class ForgotIn(BaseModel):
+    email: str = Field(max_length=120)
+    lang: Lang = "uz"
+
+
+class ResetIn(BaseModel):
+    email: str = Field(max_length=120)
+    code: str = Field(min_length=6, max_length=6, pattern=r"^\d{6}$")
+    password: str = Field(min_length=6, max_length=128)
+    password_confirm: str | None = Field(None, max_length=128)
+
+
+class FriendReqIn(BaseModel):
+    username: str = Field(min_length=1, max_length=30)
 
 
 class RegisterIn(BaseModel):
     name: str = Field(min_length=1, max_length=40)
     email: str = Field(max_length=120)
     password: str = Field(min_length=6, max_length=128)
+    password_confirm: str | None = Field(None, max_length=128)  # the UI always sends it; checked here as well
+    username: str | None = Field(None, max_length=30)           # public handle; generated from the e-mail when omitted
     lang: Lang = "uz"  # language of the verification e-mail
 
 
@@ -141,8 +171,25 @@ class LoginIn(BaseModel):
 
 
 # ---------------- helpers ----------------
-def clean_analysis(d) -> dict:
-    """Make the model's JSON safe for the UI; charts only for real geometry."""
+def _clean_graph(g):
+    """A function graph the browser can draw safely (the expression is whitelisted again in the browser)."""
+    if not isinstance(g, dict) or not isinstance(g.get("functions"), list):
+        return None
+    fns = [{"expr": str(f.get("expr", ""))[:200], "label": str(f.get("label", ""))[:80]}
+           for f in g["functions"][:3] if isinstance(f, dict) and f.get("expr")]
+    try:
+        x0, x1 = float(g.get("xmin", -5)), float(g.get("xmax", 5))
+    except (TypeError, ValueError):
+        return None
+    if not fns or not x1 > x0:
+        return None
+    pts = [{"x": p["x"], "y": p["y"], "label": str(p.get("label", ""))[:20]} for p in (g.get("points") or [])[:8]
+           if isinstance(p, dict) and isinstance(p.get("x"), (int, float)) and isinstance(p.get("y"), (int, float))]
+    return {"functions": fns, "xmin": x0, "xmax": x1, "points": pts}
+
+
+def clean_analysis(d, advanced: bool = False) -> dict:
+    """Make the model's JSON safe for the UI. Diagrams only for geometry; function graphs only for paying users."""
     if not isinstance(d, dict) or not isinstance(d.get("steps"), list) or not d["steps"]:
         raise HTTPException(502, "AI returned an incomplete solution, please try again")
     geo = d.get("geometry_svg_or_coords")
@@ -153,7 +200,10 @@ def clean_analysis(d) -> dict:
     pr = d.get("practice") if isinstance(d.get("practice"), dict) else {}
     d["practice"] = {lv: [x for x in pr.get(lv, []) if isinstance(x, dict)] if isinstance(pr.get(lv), list) else [] for lv in XP_PRACTICE}
     d.pop("diagram", None)
-    d.pop("graph", None)
+    raw_graph = d.pop("graph", None)  # always removed, then kept only for paying users
+    graph = _clean_graph(raw_graph) if advanced else None
+    if graph:
+        d["graph"] = graph
     return d
 
 
@@ -240,15 +290,45 @@ def _wait_left(pending: dict) -> int:
     return max(0, math.ceil(config.OTP_RESEND_SECONDS - (time.time() - sent_at)))
 
 
-async def _mail_the_code(email: str, name: str, code: str, lang: str) -> None:
+def _check_otp(pending: dict | None, given: str, bump, drop) -> None:
+    """Shared by sign-up and password reset: expiry, 5 guesses at most, constant-time comparison."""
+    if not pending or time.time() > pending["expires_at"]:
+        drop()
+        raise HTTPException(410, {"code": "code_expired", "message": "The code has expired, please request a new one"})
+    if pending["attempts"] >= config.OTP_MAX_ATTEMPTS:
+        drop()
+        raise HTTPException(429, {"code": "too_many_attempts", "message": "Too many wrong codes, please start again"})
+    if not hmac.compare_digest(pending["code"].encode(), given.encode()):
+        left = config.OTP_MAX_ATTEMPTS - bump()
+        if left <= 0:
+            drop()  # the code is burned: a brute-force run gets at most OTP_MAX_ATTEMPTS guesses
+            raise HTTPException(429, {"code": "too_many_attempts", "message": "Too many wrong codes, please start again"})
+        raise HTTPException(400, {"code": "wrong_code", "message": "Wrong code", "attempts_left": left})
+
+
+async def _mail_the_code(email: str, name: str, code: str, lang: str, drop, kind: str = "verify") -> None:
     try:
-        await send_code(email, name, code, lang)
+        await send_code(email, name, code, lang, kind)
     except MailNotConfigured:
-        db.verification_delete(email)
+        drop()
         raise HTTPException(503, {"code": "mail_not_configured", "message": "E-mail sending is not configured on the server"})
     except MailFailed:
-        db.verification_delete(email)  # do not lock the user out with a cooldown for a mail that never left
-        raise HTTPException(502, {"code": "mail_failed", "message": "The verification e-mail could not be sent, please try again"})
+        drop()  # do not lock the user out with a cooldown for a mail that never left
+        raise HTTPException(502, {"code": "mail_failed", "message": "The e-mail could not be sent, please try again"})
+
+
+def _same_password(password: str, confirm: str | None) -> None:
+    if confirm is not None and confirm != password:
+        raise HTTPException(400, {"code": "password_mismatch", "message": "The two passwords are not the same"})
+
+
+@app.get("/api/auth/username-available")
+def username_available(u: str, request: Request):
+    rate_limit(request, "uname", 40)
+    name = u.strip().lower().lstrip("@")
+    if not db.valid_username(name):
+        return {"valid": False, "available": False}
+    return {"valid": True, "available": not db.username_taken(name)}
 
 
 @app.post("/api/auth/register")
@@ -258,23 +338,34 @@ async def register(b: RegisterIn, request: Request):
     email = b.email.strip().lower()
     if not EMAIL_RE.fullmatch(email):
         raise HTTPException(400, "Invalid email")
+    _same_password(b.password, b.password_confirm)
+    username = (b.username or "").strip().lower().lstrip("@")
+    if username:
+        if not db.valid_username(username):
+            raise HTTPException(400, {"code": "bad_username", "message": "Username: 3-20 letters, digits or _"})
+        if db.username_taken(username):
+            raise HTTPException(409, {"code": "username_taken", "message": "This username is taken"})
+    else:
+        username = db.free_username(email.split("@")[0], db.username_taken)
     if db.user_by_email(email):
-        raise HTTPException(409, "This email is already registered")
+        raise HTTPException(409, {"code": "email_taken", "message": "This email is already registered"})
     pw_hash = await asyncio.to_thread(hash_password, b.password)  # bcrypt is slow on purpose: keep it off the event loop
     name = b.name.strip()
     if not config.REQUIRE_EMAIL_VERIFICATION:  # switched off (e.g. local development): register at once
         try:
-            uid = db.create_user(email, name, pw_hash)
+            uid = db.create_user(email, name, pw_hash, username)
         except db.EmailTaken:
-            raise HTTPException(409, "This email is already registered")
+            raise HTTPException(409, {"code": "email_taken", "message": "This email is already registered"})
+        except db.UsernameTaken:
+            raise HTTPException(409, {"code": "username_taken", "message": "This username is taken"})
         return {"token": make_token(uid), "user": db.get_user(uid)}
     rate_limit(request, "regmail", 5, 600)  # nobody can use us to flood mailboxes
     pending = db.verification_get(email)
     if pending and _wait_left(pending) > 0:
         raise HTTPException(429, {"code": "resend_wait", "message": "Please wait before requesting a new code", "retry_after": _wait_left(pending)})
     code = _otp()
-    db.verification_put(email, name, pw_hash, code, time.time() + config.OTP_TTL_SECONDS)
-    await _mail_the_code(email, name, code, b.lang)
+    db.verification_put(email, name, pw_hash, code, time.time() + config.OTP_TTL_SECONDS, username)
+    await _mail_the_code(email, name, code, b.lang, lambda: db.verification_delete(email))
     return {"status": "verification_sent", "email": email, "expires_in": config.OTP_TTL_SECONDS, "resend_after": config.OTP_RESEND_SECONDS}
 
 
@@ -284,23 +375,14 @@ def verify_email(b: VerifyIn, request: Request):
     rate_limit(request, "verify", 15)
     email = b.email.strip().lower()
     pending = db.verification_get(email)
-    if not pending or time.time() > pending["expires_at"]:
-        db.verification_delete(email)
-        raise HTTPException(410, {"code": "code_expired", "message": "The code has expired, please request a new one"})
-    if pending["attempts"] >= config.OTP_MAX_ATTEMPTS:
-        db.verification_delete(email)
-        raise HTTPException(429, {"code": "too_many_attempts", "message": "Too many wrong codes, please register again"})
-    if not hmac.compare_digest(pending["code"].encode(), b.code.encode()):
-        left = config.OTP_MAX_ATTEMPTS - db.verification_bump(email)
-        if left <= 0:
-            db.verification_delete(email)  # the code is burned: a brute-force run gets at most OTP_MAX_ATTEMPTS guesses
-            raise HTTPException(429, {"code": "too_many_attempts", "message": "Too many wrong codes, please register again"})
-        raise HTTPException(400, {"code": "wrong_code", "message": "Wrong code", "attempts_left": left})
+    _check_otp(pending, b.code, lambda: db.verification_bump(email), lambda: db.verification_delete(email))
     try:
-        uid = db.create_user(email, pending["name"], pending["pw_hash"])
+        uid = db.create_user(email, pending["name"], pending["pw_hash"], pending.get("username"))
     except db.EmailTaken:
         db.verification_delete(email)
-        raise HTTPException(409, "This email is already registered")
+        raise HTTPException(409, {"code": "email_taken", "message": "This email is already registered"})
+    except db.UsernameTaken:
+        raise HTTPException(409, {"code": "username_taken", "message": "This username was taken meanwhile, please register again"})
     db.verification_delete(email)
     return {"token": make_token(uid), "user": db.get_user(uid)}
 
@@ -315,9 +397,41 @@ async def resend_code(b: ResendIn, request: Request):
     if _wait_left(pending) > 0:
         raise HTTPException(429, {"code": "resend_wait", "message": "Please wait before requesting a new code", "retry_after": _wait_left(pending)})
     code = _otp()
-    db.verification_put(email, pending["name"], pending["pw_hash"], code, time.time() + config.OTP_TTL_SECONDS)  # new code, attempts reset
-    await _mail_the_code(email, pending["name"], code, b.lang)
+    db.verification_put(email, pending["name"], pending["pw_hash"], code, time.time() + config.OTP_TTL_SECONDS, pending.get("username"))  # new code, attempts reset
+    await _mail_the_code(email, pending["name"], code, b.lang, lambda: db.verification_delete(email))
     return {"status": "verification_sent", "email": email, "expires_in": config.OTP_TTL_SECONDS, "resend_after": config.OTP_RESEND_SECONDS}
+
+
+@app.post("/api/auth/forgot")
+async def forgot_password(b: ForgotIn, request: Request):
+    """Forgot password, step 1: e-mail a 6-digit code. The answer is the same whether or not the address has an account."""
+    rate_limit(request, "regmail", 5, 600)
+    email = b.email.strip().lower()
+    answer = {"status": "reset_sent", "resend_after": config.OTP_RESEND_SECONDS, "expires_in": config.OTP_TTL_SECONDS}
+    user = db.user_by_email(email) if EMAIL_RE.fullmatch(email) else None
+    if user is None:
+        return answer
+    pending = db.reset_get(email)
+    if pending and _wait_left(pending) > 0:
+        return answer
+    code = _otp()
+    db.reset_put(email, code, time.time() + config.OTP_TTL_SECONDS)
+    await _mail_the_code(email, user["name"], code, b.lang, lambda: db.reset_delete(email), kind="reset")
+    return answer
+
+
+@app.post("/api/auth/reset")
+async def reset_password(b: ResetIn, request: Request):
+    """Forgot password, step 2: the code + a new password. All earlier sessions are signed out."""
+    rate_limit(request, "verify", 15)
+    email = b.email.strip().lower()
+    _same_password(b.password, b.password_confirm)
+    pending, user = db.reset_get(email), db.user_by_email(email)
+    _check_otp(pending if user else None, b.code, lambda: db.reset_bump(email), lambda: db.reset_delete(email))
+    pw_hash = await asyncio.to_thread(hash_password, b.password)
+    db.set_password(user["id"], pw_hash)
+    db.reset_delete(email)
+    return {"status": "password_changed"}
 
 
 # ---------------- neural voice ----------------
@@ -363,15 +477,18 @@ def sync_put(body: dict, uid: int = Depends(required_user_id)):
 
 # ---------------- tutor ----------------
 @app.post("/api/analyze-problem")
-async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(optional_user_id)):
+async def analyze(body: AnalyzeIn, request: Request, user: dict | None = Depends(optional_user)):
     if not body.text.strip() and not body.image_base64:
         raise HTTPException(400, "Provide text or an image")
     rate_limit(request, "llm", 20)
+    uid = user["id"] if user else None
+    plan = user["plan"] if user else "free"
+    advanced = plan in config.PAID_PLANS  # Premium / VIP: function graphs + richer geometry, own AI lane, stronger model
     guest = None
     if not balancer.total:
         key, data, cached = "demo", DEMO, True
     else:
-        key = db.cache_key(body.text, body.lang, body.image_base64)
+        key = db.cache_key(body.text, body.lang, body.image_base64, advanced)
         ipk, newly, charged = None, False, False
         ip = client_ip(request)
         if uid is None and config.GUEST_PROBLEM_LIMIT > 0 and not is_loopback(ip):
@@ -391,12 +508,14 @@ async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(o
             data = db.cache_get(key)  # cache hit: no AI call at all
             cached = data is not None
             if data is None:
-                system = f"You are an expert math tutor. Write all explanations in {LANGS[body.lang]}. " + SCHEMA
+                system = f"You are an expert math tutor. Write all explanations in {LANGS[body.lang]}. " + SCHEMA + (ADVANCED if advanced else "")
                 parts = []
                 if body.image_base64:
                     parts.append({"inline_data": {"mime_type": body.image_mime, "data": body.image_base64}})
                 parts.append({"text": body.text or "Solve the problem shown in the image."})
-                data = clean_analysis(parse_json(await gemini(parts, system, as_json=True)))
+                async with lane(plan):
+                    raw = await gemini(parts, system, as_json=True, model=model_for(plan))
+                data = clean_analysis(parse_json(raw), advanced)
                 db.cache_put(key, body.lang, data)
         except BaseException:
             if ipk and newly:  # the AI failed: an error must not cost a guest problem or a token
@@ -410,8 +529,8 @@ async def analyze(body: AnalyzeIn, request: Request, uid: int | None = Depends(o
     if key == "demo":
         out["demo"] = True
     elif uid is not None:
-        gained, user = db.record_activity(uid, award_key=f"a:{key}", xp=XP_ANALYZE, problem=True)
-        out["progress"] = {"xp_gained": gained, "user": user}
+        gained, u2 = db.record_activity(uid, award_key=f"a:{key}", xp=XP_ANALYZE, problem=True)
+        out["progress"] = {"xp_gained": gained, "user": u2}
         try:  # every solved problem gets its own chat thread (one per problem)
             out["thread_id"] = db.create_thread(uid, plain_title(data), topic_summary(data), key)["id"]
         except Exception:
@@ -484,17 +603,34 @@ def admin_login(b: AdminLoginIn, request: Request):
     return {"token": make_admin_token(), "expires_hours": config.ADMIN_TOKEN_HOURS}
 
 
+@app.get("/api/admin/stats", dependencies=[Depends(require_admin)])
+def admin_stats():
+    return db.admin_stats()
+
+
 @app.get("/api/admin/users", dependencies=[Depends(require_admin)])
 def admin_users(q: str = "", limit: int = 50, offset: int = 0):
+    """Search by username / nickname, name or e-mail."""
     return db.admin_list_users(q[:100], max(1, min(limit, 200)), max(0, offset))
 
 
 @app.post("/api/admin/users/{user_id}/tokens", dependencies=[Depends(require_admin)])
-def admin_grant(user_id: int, b: GrantIn):
-    user = db.admin_add_tokens(user_id, b.amount)
+def admin_tokens(user_id: int, b: GrantIn):
+    """amount > 0 adds tokens, amount < 0 subtracts them (never below 0)."""
+    user = db.admin_adjust_tokens(user_id, b.amount)
     if not user:
         raise HTTPException(404, "User not found")
-    log.info("admin granted %d tokens to user %d", b.amount, user_id)
+    log.info("admin changed tokens of user %d by %+d", user_id, b.amount)
+    return {"user": user}
+
+
+@app.post("/api/admin/users/{user_id}/plan", dependencies=[Depends(require_admin)])
+def admin_plan(user_id: int, b: PlanIn):
+    """Activate / renew / cancel a subscription (paid manually via Telegram)."""
+    user = db.admin_set_plan(user_id, b.plan, b.days)
+    if not user:
+        raise HTTPException(404, "User not found")
+    log.info("admin set plan %s (%d days) for user %d", b.plan, b.days, user_id)
     return {"user": user}
 
 
@@ -536,17 +672,77 @@ async def thread_send(tid: int, b: MsgIn, request: Request, uid: int = Depends(r
     if not th:
         raise HTTPException(404, "Chat not found")
     if balancer.total:
-        memory = th["topic_summary"] or "A free math conversation (no particular problem yet)."
-        system = (f"You are a patient math tutor. Answer in {LANGS[b.lang]}, briefly and clearly, inline math in $...$. "
-                  "This conversation belongs to one topic; remember it and everything said earlier in it.\n"
-                  f"Topic of this conversation:\n{memory}")
-        ctx = json.dumps(b.context, ensure_ascii=False)[:1500] if b.context else ""
-        text = b.content + (f"\n\n[What the student is looking at right now: {ctx}]" if ctx else "")
-        history = history_to_contents(db.list_messages(tid, last=20))
-        reply = await gemini([{"text": text}], system, as_json=False, history=history)
+        # every 3rd message (counted over all threads) costs 1 token; with no tokens left that message is refused
+        allowed, charged = db.charge_chat_message(uid)
+        if not allowed:
+            raise HTTPException(403, {"code": "tokens_exhausted",
+                                      "message": "Daily tokens exhausted. They are renewed at midnight (Tashkent time)."})
+        try:
+            plan = (db.get_user(uid) or {}).get("plan", "free")
+            memory = th["topic_summary"] or "A free math conversation (no particular problem yet)."
+            system = (f"You are a patient math tutor. Answer in {LANGS[b.lang]}, briefly and clearly, inline math in $...$. "
+                      "This conversation belongs to one topic; remember it and everything said earlier in it.\n"
+                      f"Topic of this conversation:\n{memory}")
+            ctx = json.dumps(b.context, ensure_ascii=False)[:1500] if b.context else ""
+            text = b.content + (f"\n\n[What the student is looking at right now: {ctx}]" if ctx else "")
+            history = history_to_contents(db.list_messages(tid, last=20))
+            async with lane(plan):
+                reply = await gemini([{"text": text}], system, as_json=False, history=history, model=model_for(plan))
+        except BaseException:
+            db.refund_chat_message(uid, charged)  # the AI failed: the message does not count
+            raise
     else:
         reply = "Demo mode: add GEMINI_API_KEY_1 to backend/.env to chat with the tutor."
-    saved = db.add_messages(tid, [("user", b.content), ("assistant", reply.strip() or "…")])
+    saved = db.add_messages(tid, [("user", b.content), ("assistant", reply.strip() or "…")])  # saved only after a successful answer
     if th["title"] == "New chat" and not th["problem_key"]:  # a free chat is named after its first question
-        db.rename_thread(tid, re.sub(r"\s+", " ", b.content).strip()[:60])  # saved only after a successful answer
-    return {"reply": saved[1], "message": saved[0]}
+        db.rename_thread(tid, re.sub(r"\s+", " ", b.content).strip()[:60])
+    return {"reply": saved[1], "message": saved[0], "user": db.get_user(uid)}
+
+
+# ---------------- friends / leaderboard / milestones ----------------
+_FRIEND_HTTP = {"user_not_found": 404, "self": 400, "already_friends": 409, "already_requested": 409, "not_found": 404}
+
+
+def _friend_error(e: db.FriendError) -> HTTPException:
+    return HTTPException(_FRIEND_HTTP.get(e.code, 400), {"code": e.code, "message": e.code.replace("_", " ")})
+
+
+@app.get("/api/friends")
+def friends_list(uid: int = Depends(required_user_id)):
+    return db.friends_overview(uid)
+
+
+@app.post("/api/friends/request")
+def friends_request(b: FriendReqIn, request: Request, uid: int = Depends(required_user_id)):
+    rate_limit(request, "friend", 20)
+    try:
+        return {"status": db.friend_request(uid, b.username.strip().lower().lstrip("@"))}
+    except db.FriendError as e:
+        raise _friend_error(e)
+
+
+@app.post("/api/friends/{fid}/accept")
+def friends_accept(fid: int, uid: int = Depends(required_user_id)):
+    try:
+        db.friend_accept(uid, fid)
+    except db.FriendError as e:
+        raise _friend_error(e)
+    return {"ok": True}
+
+
+@app.delete("/api/friends/{fid}")
+def friends_remove(fid: int, uid: int = Depends(required_user_id)):
+    if not db.friend_remove(uid, fid):
+        raise HTTPException(404, {"code": "not_found", "message": "not found"})
+    return {"ok": True}
+
+
+@app.get("/api/leaderboard")
+def leaderboard(by: Literal["xp", "streak"] = "xp", uid: int = Depends(required_user_id)):
+    """Ranking of me and my friends (no global list: nobody is shown to strangers)."""
+    return {"by": by, "rows": db.leaderboard(uid, by)}
+
+
+@app.get("/api/feed")
+def milestones_feed(uid: int = Depends(required_user_id)):
+    return {"items": db.feed(uid)}

@@ -29,7 +29,7 @@ export default function Workspace({ lang, user, title, onBack, onHistory, onProg
   const tk = user ? user.tokens_remaining : null
 
   return (
-    <motion.div className="workspace fixed inset-0 z-40 flex flex-col bg-slate-50 dark:bg-slate-950"
+    <motion.div className="workspace fixed inset-0 z-40 flex flex-col bg-slate-50/90 backdrop-blur-xl dark:bg-slate-950/90"
       initial={{ opacity: 0, y: 28 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: 28 }} transition={{ duration: 0.3, ease: 'easeOut' }}>
       <div className="print:hidden flex items-center gap-2 px-3 md:px-6 py-2 border-b border-slate-200 dark:border-slate-800 bg-white/80 dark:bg-slate-900/80 backdrop-blur">
         <button className="btn-ghost text-sm font-bold" onClick={onBack}>← {t.back}</button>

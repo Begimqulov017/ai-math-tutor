@@ -9,14 +9,15 @@ import functools
 import hashlib
 import json
 import logging
+import math
 import re
 import time
 import unicodedata
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from sqlalchemy import (Column, Date, Float, ForeignKey, Integer, MetaData, String, Table, Text, create_engine, delete, event,
-                        func, inspect, select, text, update)
+from sqlalchemy import (Column, Date, Float, ForeignKey, Integer, MetaData, String, Table, Text, and_, case, create_engine, delete,
+                        event, func, inspect, or_, select, text, update)
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.engine import make_url
 from sqlalchemy.exc import IntegrityError, InterfaceError, OperationalError
@@ -99,6 +100,12 @@ users = Table(
     Column("created", Float),
     Column("tokens_remaining", Integer, nullable=False, server_default="50"),
     Column("last_token_reset", Date),
+    Column("username", String(20), unique=True),  # public handle: friends, leaderboard, admin search
+    Column("bonus_tokens", Integer, nullable=False, server_default="0"),  # admin grants: never reset, spent after the daily pool
+    Column("plan", String(10), nullable=False, server_default="free"),    # free | premium | vip
+    Column("plan_expires_at", Float),                                      # epoch seconds, NULL = no end date
+    Column("chat_msg_count", Integer, nullable=False, server_default="0"),  # chat messages since the last chat token
+    Column("tokens_valid_after", Float, nullable=False, server_default="0"),  # sessions issued before this are void (password reset)
 )
 awards = Table("awards", metadata, Column("user_id", Integer, primary_key=True), Column("key", String(255), primary_key=True))
 problem_cache = Table(
@@ -135,6 +142,29 @@ email_verifications = Table(  # a registration waiting for its 6-digit code (the
     Column("code", String(10), nullable=False),
     Column("expires_at", Float, nullable=False),  # DOUBLE PRECISION on PostgreSQL, REAL on SQLite
     Column("attempts", Integer, nullable=False, server_default="0"),
+    Column("username", String(20)),
+)
+password_resets = Table(  # "forgot password": a 6-digit code waiting to be used
+    "password_resets", metadata,
+    Column("email", String(120), primary_key=True),
+    Column("code", String(10), nullable=False),
+    Column("expires_at", Float, nullable=False),
+    Column("attempts", Integer, nullable=False, server_default="0"),
+)
+friendships = Table(  # one row per pair: user_id asked, friend_id received; status pending -> accepted
+    "friendships", metadata,
+    Column("user_id", Integer, primary_key=True),
+    Column("friend_id", Integer, primary_key=True),
+    Column("status", String(10), nullable=False, server_default="pending"),
+    Column("created_at", Float, nullable=False),
+)
+milestones = Table(  # study achievements (streak / XP / level) shown to friends
+    "milestones", metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("user_id", Integer, nullable=False, index=True),
+    Column("kind", String(10), nullable=False),
+    Column("value", Integer, nullable=False),
+    Column("created_at", Float, nullable=False),
 )
 guest_usage = Table(  # IP is stored only as a keyed hash
     "guest_usage", metadata,
@@ -169,26 +199,41 @@ def init() -> None:
             time.sleep(2 ** attempt)
 
 
+def _ddl(sql: str, what: str) -> None:
+    try:
+        with engine.begin() as c:
+            c.execute(text(sql))
+        log.info("migration: %s", what)
+    except (OperationalError, InterfaceError):
+        raise
+    except Exception as e:  # another instance did it a moment ago
+        log.warning("migration step skipped (%s): %s", what, e.__class__.__name__)
+
+
 def migrate() -> None:
     """create_all never alters an existing table, so columns added after the first release are added here.
-    Safe to run on every start (idempotent) and by several instances at once."""
+    Idempotent: safe on every start and with several instances starting at once."""
+    ine = "IF NOT EXISTS " if IS_PG else ""  # SQLite has no IF NOT EXISTS for columns: the check below covers it
+    real = "DOUBLE PRECISION" if IS_PG else "REAL"
     have = {c["name"] for c in inspect(engine).get_columns("users")}
-    ine = "IF NOT EXISTS " if IS_PG else ""  # SQLite has no IF NOT EXISTS for columns: we check above instead
     wanted = {
-        "tokens_remaining": f"ALTER TABLE users ADD COLUMN {ine}tokens_remaining INTEGER NOT NULL DEFAULT {config.DAILY_TOKENS}",
-        "last_token_reset": f"ALTER TABLE users ADD COLUMN {ine}last_token_reset DATE",
+        "tokens_remaining": f"INTEGER NOT NULL DEFAULT {config.DAILY_TOKENS}", "last_token_reset": "DATE", "username": "VARCHAR(20)",
+        "bonus_tokens": "INTEGER NOT NULL DEFAULT 0", "plan": "VARCHAR(10) NOT NULL DEFAULT 'free'", "plan_expires_at": real,
+        "chat_msg_count": "INTEGER NOT NULL DEFAULT 0", "tokens_valid_after": f"{real} NOT NULL DEFAULT 0",
     }
-    for name, sql in wanted.items():
-        if name in have:
-            continue
-        try:
-            with engine.begin() as c:
-                c.execute(text(sql))
-            log.info("migration: added users.%s", name)
-        except (OperationalError, InterfaceError):
-            raise
-        except Exception as e:  # another instance added it a moment ago
-            log.warning("migration of users.%s skipped: %s", name, e.__class__.__name__)
+    added = set()
+    for name, ddl in wanted.items():
+        if name not in have:
+            _ddl(f"ALTER TABLE users ADD COLUMN {ine}{name} {ddl}", f"added users.{name}")
+            added.add(name)
+    if "bonus_tokens" in added:  # tokens above the free daily amount were admin grants: keep them as permanent bonus
+        d = config.PLAN_DAILY["free"]
+        _ddl(f"UPDATE users SET bonus_tokens = CASE WHEN tokens_remaining > {d} THEN tokens_remaining - {d} ELSE 0 END, "
+             f"tokens_remaining = CASE WHEN tokens_remaining > {d} THEN {d} ELSE tokens_remaining END", "moved old admin grants to bonus_tokens")
+    if "username" not in {c["name"] for c in inspect(engine).get_columns("email_verifications")}:
+        _ddl(f"ALTER TABLE email_verifications ADD COLUMN {ine}username VARCHAR(20)", "added email_verifications.username")
+    _backfill_usernames()
+    _ddl("CREATE UNIQUE INDEX IF NOT EXISTS ux_users_username ON users (username)", "unique index on users.username")
 
 
 @_retry
@@ -212,9 +257,9 @@ def normalize_problem(text_: str) -> str:
     return re.sub(r"\s+", "", s)
 
 
-def cache_key(text_: str, lang: str, image_b64: str | None = None) -> str:
+def cache_key(text_: str, lang: str, image_b64: str | None = None, advanced: bool = False) -> str:
     base = "img:" + hashlib.sha256(image_b64.encode()).hexdigest() if image_b64 else "txt:" + normalize_problem(text_)
-    return hashlib.sha256(f"{lang}|{base}".encode()).hexdigest()
+    return hashlib.sha256(f"{lang}|{base}{'|adv' if advanced else ''}".encode()).hexdigest()
 
 
 @_retry
@@ -241,8 +286,56 @@ class EmailTaken(Exception):
     pass
 
 
+class UsernameTaken(Exception):
+    pass
+
+
+class FriendError(Exception):
+    """code: user_not_found | self | already_friends | already_requested | not_found"""
+    def __init__(self, code: str):
+        super().__init__(code)
+        self.code = code
+
+
 TZ = timezone(timedelta(hours=5))  # Uzbekistan (no daylight saving) - streak days follow local midnight
-_PUBLIC = ("id", "name", "email", "xp", "streak", "best_streak", "correct", "wrong", "problems", "tokens_remaining")
+_PUBLIC = ("id", "name", "username", "email", "xp", "streak", "best_streak", "correct", "wrong", "problems")
+USERNAME_RE = re.compile(r"^[a-z0-9_]{3,20}$")
+RESERVED = {"admin", "root", "support", "system", "moderator", "null", "undefined", "api", "me", "help", "official"}
+XP_MILESTONES = (100, 250, 500, 1000, 2500, 5000, 10000)
+STREAK_MILESTONES = (3, 7, 14, 30, 60, 100, 365)
+
+
+def valid_username(u: str) -> bool:
+    return bool(USERNAME_RE.fullmatch(u or "")) and u not in RESERVED
+
+
+def free_username(base: str, is_taken) -> str:
+    """A valid, unused handle derived from `base` (the part of the e-mail before '@')."""
+    b = re.sub(r"[^a-z0-9_]", "", (base or "").lower())[:16] or "user"
+    if len(b) < 3:
+        b = (b + "user")[:16]
+    cand, n = b, 1
+    while cand in RESERVED or is_taken(cand):
+        n += 1
+        cand = f"{b[:20 - len(str(n))]}{n}"
+    return cand
+
+
+def _backfill_usernames() -> None:
+    with conn() as c:
+        rows = c.execute(select(users.c.id, users.c.email).where(users.c.username.is_(None)).order_by(users.c.id)).all()
+        if not rows:
+            return
+        taken = {r[0] for r in c.execute(select(users.c.username).where(users.c.username.is_not(None)))}
+        for uid, email in rows:
+            name = free_username(email.split("@")[0], lambda n: n in taken)
+            taken.add(name)
+            c.execute(update(users).where(users.c.id == uid).values(username=name))
+        log.info("migration: gave a username to %d existing users", len(rows))
+
+
+def level_of(xp: int) -> int:
+    return math.isqrt(max(0, int(xp))) // 10 + 1  # = floor(sqrt(xp / 100)) + 1, the same formula as the UI
 
 
 def _today() -> str:
@@ -257,19 +350,33 @@ def _today_date():
     return datetime.now(TZ).date()
 
 
+def _effective_plan(r) -> str:
+    """The plan in force right now: a paid plan whose end date has passed counts as free."""
+    plan, exp = r.get("plan") or "free", r.get("plan_expires_at")
+    return plan if plan in config.PAID_PLANS and (exp is None or exp > time.time()) else "free"
+
+
+def _daily_for(r) -> int:
+    return config.PLAN_DAILY[_effective_plan(r)]
+
+
 def _reset_if_new_day(c, u: dict) -> dict:
-    """New calendar day (Tashkent) since the last reset -> top the tokens up to DAILY_TOKENS.
-    Tokens granted by an admin above that amount are kept."""
+    """New calendar day (Tashkent) -> the daily pool is refilled to the plan's amount. Bonus tokens stay untouched."""
     today = _today_date()
     if u.get("last_token_reset") != today:
-        tokens = max(u["tokens_remaining"], config.DAILY_TOKENS)
-        c.execute(update(users).where(users.c.id == u["id"]).values(tokens_remaining=tokens, last_token_reset=today))
-        return {**u, "tokens_remaining": tokens, "last_token_reset": today}
+        pool = _daily_for(u)
+        c.execute(update(users).where(users.c.id == u["id"]).values(tokens_remaining=pool, last_token_reset=today))
+        return {**u, "tokens_remaining": pool, "last_token_reset": today}
     return u
 
 
 def public_user(r) -> dict:
-    return {**{k: r[k] for k in _PUBLIC}, "daily_tokens": config.DAILY_TOKENS}
+    """tokens_remaining is the TOTAL the user can spend (daily pool + bonus)."""
+    plan = _effective_plan(r)
+    until = max(1, config.CHAT_MESSAGES_PER_TOKEN - (r["chat_msg_count"] or 0))  # chat messages until the next token is taken
+    return {**{k: r[k] for k in _PUBLIC}, "tokens_remaining": r["tokens_remaining"] + r["bonus_tokens"], "bonus_tokens": r["bonus_tokens"],
+            "daily_tokens": config.PLAN_DAILY[plan], "plan": plan, "plan_expires_at": r["plan_expires_at"] if plan != "free" else None,
+            "chat_until_charge": until}
 
 
 @_retry
@@ -280,6 +387,16 @@ def get_user(uid: int):
 
 
 @_retry
+def auth_user(uid: int, issued: float | None):
+    """The user a token belongs to, or None: unknown user, or the token was issued before the last password reset."""
+    with conn() as c:
+        r = c.execute(select(users).where(users.c.id == uid)).mappings().first()
+        if not r or (issued or 0) < float(r["tokens_valid_after"] or 0):
+            return None
+        return public_user(_reset_if_new_day(c, dict(r)))
+
+
+@_retry
 def user_by_email(email: str):
     with conn() as c:
         r = c.execute(select(users).where(users.c.email == email)).mappings().first()
@@ -287,19 +404,43 @@ def user_by_email(email: str):
 
 
 @_retry
-def create_user(email: str, name: str, pw_hash: str) -> int:
-    try:
-        with conn() as c:
-            res = c.execute(users.insert().values(email=email, name=name, pw_hash=pw_hash, created=time.time()))
-            return int(res.inserted_primary_key[0])
-    except IntegrityError:
-        raise EmailTaken from None
+def user_by_username(username: str):
+    with conn() as c:
+        r = c.execute(select(users).where(users.c.username == username)).mappings().first()
+        return dict(r) if r else None
+
+
+@_retry
+def username_taken(username: str) -> bool:
+    with conn() as c:
+        return c.execute(select(users.c.id).where(users.c.username == username)).first() is not None
+
+
+@_retry
+def create_user(email: str, name: str, pw_hash: str, username: str | None = None) -> int:
+    """Insert a user. EmailTaken / UsernameTaken say exactly what collided; any other integrity problem is re-raised."""
+    for _ in range(3):
+        try:
+            with conn() as c:
+                uname = username or free_username(email.split("@")[0], lambda n: c.execute(select(users.c.id).where(users.c.username == n)).first() is not None)
+                res = c.execute(users.insert().values(email=email, name=name, pw_hash=pw_hash, created=time.time(), username=uname,
+                                                      last_token_reset=_today_date(), tokens_remaining=config.PLAN_DAILY["free"]))
+                return int(res.inserted_primary_key[0])
+        except IntegrityError:
+            if user_by_email(email):
+                raise EmailTaken from None
+            if username:
+                if username_taken(username):
+                    raise UsernameTaken from None
+                raise
+            # a generated username collided with a signup happening at the same moment: pick another one
+    raise UsernameTaken
 
 
 @_retry
 def record_activity(uid: int, *, award_key: str | None = None, xp: int = 0, ok: bool | None = None, problem: bool = False):
-    """One transaction (row locked on PostgreSQL): touch the daily streak, give XP once per award_key,
-    update counters. Returns (xp_gained, public_user)."""
+    """One transaction (row locked on PostgreSQL): touch the daily streak, give XP once per award_key, update counters
+    and record milestones (streak / XP / level) for the friends feed. Returns (xp_gained, public_user)."""
     with conn() as c:
         u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
         if not u:
@@ -318,6 +459,14 @@ def record_activity(uid: int, *, award_key: str | None = None, xp: int = 0, ok: 
             wrong=u["wrong"] + (1 if ok is False else 0),
             problems=u["problems"] + (1 if problem and gained else 0))
         c.execute(update(users).where(users.c.id == uid).values(**vals))
+        events = []
+        if streak > u["streak"] and streak in STREAK_MILESTONES:
+            events.append(("streak", streak))
+        events += [("xp", m) for m in XP_MILESTONES if u["xp"] < m <= vals["xp"]]
+        if level_of(vals["xp"]) > level_of(u["xp"]):
+            events.append(("level", level_of(vals["xp"])))
+        for kind, value in events:
+            c.execute(milestones.insert().values(user_id=uid, kind=kind, value=value, created_at=time.time()))
         return gained, public_user({**u, **vals})
 
 
@@ -376,6 +525,15 @@ def guest_used(ip_hash: str, window_hours: int = 0) -> int:
 
 
 # ---------------- daily tokens ----------------
+def _spend(u: dict, n: int):
+    """Take n tokens: the daily pool first, then the permanent bonus. -> (pool, bonus) or None if there are not enough."""
+    pool, bonus = u["tokens_remaining"], u["bonus_tokens"]
+    if pool + bonus < n:
+        return None
+    take = min(pool, n)
+    return pool - take, bonus - (n - take)
+
+
 @_retry
 def charge_token(uid: int, key: str):
     """Take 1 token for analysing problem `key`. The same problem again on the same day is free.
@@ -388,12 +546,13 @@ def charge_token(uid: int, key: str):
         today = _today()
         c.execute(delete(awards).where(awards.c.user_id == uid, awards.c.key.like("t:%"), awards.c.key < f"t:{today}"))  # old days
         if c.execute(select(awards.c.key).where(awards.c.user_id == uid, awards.c.key == f"t:{today}:{key}")).first():
-            return True, u["tokens_remaining"], False
-        if u["tokens_remaining"] <= 0:
+            return True, u["tokens_remaining"] + u["bonus_tokens"], False
+        left = _spend(u, 1)
+        if left is None:
             return False, 0, False
         c.execute(_insert(awards).values(user_id=uid, key=f"t:{today}:{key}").on_conflict_do_nothing())
-        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=u["tokens_remaining"] - 1))
-        return True, u["tokens_remaining"] - 1, True
+        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=left[0], bonus_tokens=left[1]))
+        return True, sum(left), True
 
 
 @_retry
@@ -404,6 +563,37 @@ def refund_token(uid: int, key: str) -> None:
             c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=users.c.tokens_remaining + 1))
 
 
+@_retry
+def charge_chat_message(uid: int):
+    """Every CHAT_MESSAGES_PER_TOKEN-th chat message (counted over all threads) costs 1 token.
+    Returns (allowed, charged)."""
+    with conn() as c:
+        u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
+        if not u:
+            return False, False
+        u = _reset_if_new_day(c, dict(u))
+        count = (u["chat_msg_count"] or 0) + 1
+        if count >= config.CHAT_MESSAGES_PER_TOKEN:
+            left = _spend(u, 1)
+            if left is None:
+                return False, False
+            c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=left[0], bonus_tokens=left[1], chat_msg_count=0))
+            return True, True
+        c.execute(update(users).where(users.c.id == uid).values(chat_msg_count=count))
+        return True, False
+
+
+@_retry
+def refund_chat_message(uid: int, charged: bool) -> None:
+    """The AI failed: undo the message count (and the token, if this message had paid one)."""
+    with conn() as c:
+        if charged:
+            c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=users.c.tokens_remaining + 1,
+                                                                    chat_msg_count=config.CHAT_MESSAGES_PER_TOKEN - 1))
+        else:
+            c.execute(update(users).where(users.c.id == uid).values(chat_msg_count=case((users.c.chat_msg_count > 0, users.c.chat_msg_count - 1), else_=0)))
+
+
 # ---------------- admin ----------------
 def _like_escape(q: str) -> str:
     return q.lower().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
@@ -411,31 +601,69 @@ def _like_escape(q: str) -> str:
 
 @_retry
 def admin_list_users(q: str = "", limit: int = 50, offset: int = 0) -> dict:
+    """Search by username, name or e-mail (case-insensitive, partial)."""
     with conn() as c:
         stmt = select(users)
         if q.strip():
-            stmt = stmt.where(func.lower(users.c.email).like("%" + _like_escape(q.strip()) + "%", escape="\\"))
+            pat = "%" + _like_escape(q.strip().lstrip("@")) + "%"
+            stmt = stmt.where(or_(*[func.lower(col).like(pat, escape="\\") for col in (users.c.email, users.c.username, users.c.name)]))
         total = c.execute(select(func.count()).select_from(stmt.subquery())).scalar() or 0
         rows = c.execute(stmt.order_by(users.c.id.desc()).limit(limit).offset(offset)).mappings().all()
         today, out = _today_date(), []
         for r in rows:
-            d = public_user({**r, "tokens_remaining": r["tokens_remaining"] if r["last_token_reset"] == today
-                             else max(r["tokens_remaining"], config.DAILY_TOKENS)})  # what the user would see now
+            eff = dict(r)
+            if r["last_token_reset"] != today:  # what the user would see right now
+                eff["tokens_remaining"] = _daily_for(r)
+            d = public_user(eff)
             d.update(last_active=r["last_day"] or None, created=r["created"])
             out.append(d)
         return {"total": total, "users": out}
 
 
 @_retry
-def admin_add_tokens(uid: int, amount: int):
+def admin_stats() -> dict:
+    with conn() as c:
+        n = lambda *w: c.execute(select(func.count()).select_from(users).where(*w)).scalar() or 0  # noqa: E731
+        live = lambda p: and_(users.c.plan == p, or_(users.c.plan_expires_at.is_(None), users.c.plan_expires_at > time.time()))  # noqa: E731
+        return {"users": n(), "premium": n(live("premium")), "vip": n(live("vip")), "active_today": n(users.c.last_day == _today())}
+
+
+@_retry
+def admin_adjust_tokens(uid: int, delta: int):
+    """delta > 0 gives permanent bonus tokens; delta < 0 takes tokens away (daily pool first, then bonus), never below 0."""
     with conn() as c:
         u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
         if not u:
             return None
         u = _reset_if_new_day(c, dict(u))
-        new = u["tokens_remaining"] + amount
-        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=new))
-        return public_user({**u, "tokens_remaining": new})
+        pool, bonus = u["tokens_remaining"], u["bonus_tokens"]
+        if delta >= 0:
+            bonus += delta
+        else:
+            need = -delta
+            take = min(pool, need); pool -= take; need -= take
+            take = min(bonus, need); bonus -= take
+        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=pool, bonus_tokens=bonus))
+        return public_user({**u, "tokens_remaining": pool, "bonus_tokens": bonus})
+
+
+@_retry
+def admin_set_plan(uid: int, plan: str, days: int):
+    """Activate / renew a plan. Renewing the same active plan adds the days to its current end date.
+    days <= 0 = no end date. The daily pool is topped up to the new plan at once."""
+    with conn() as c:
+        u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
+        if not u:
+            return None
+        u = _reset_if_new_day(c, dict(u))
+        now, exp = time.time(), None
+        if plan != "free" and days > 0:
+            cur = u["plan_expires_at"]
+            base = cur if (u["plan"] == plan and cur and cur > now) else now
+            exp = base + days * 86400
+        pool = max(u["tokens_remaining"], config.PLAN_DAILY[plan]) if plan != "free" else min(u["tokens_remaining"], config.PLAN_DAILY["free"])
+        c.execute(update(users).where(users.c.id == uid).values(plan=plan, plan_expires_at=exp, tokens_remaining=pool))
+        return public_user({**u, "plan": plan, "plan_expires_at": exp, "tokens_remaining": pool})
 
 
 # ---------------- chat threads / messages ----------------
@@ -516,10 +744,10 @@ def rename_thread(tid: int, title: str) -> None:
 
 # ---------------- e-mail verification (OTP) ----------------
 @_retry
-def verification_put(email: str, name: str, pw_hash: str, code: str, expires_at: float) -> None:
+def verification_put(email: str, name: str, pw_hash: str, code: str, expires_at: float, username: str | None = None) -> None:
     """Start (or restart) a pending registration: a new code and zero wrong attempts."""
-    stmt = _insert(email_verifications).values(email=email, name=name, pw_hash=pw_hash, code=code, expires_at=expires_at, attempts=0)
-    stmt = stmt.on_conflict_do_update(index_elements=["email"], set_={k: stmt.excluded[k] for k in ("name", "pw_hash", "code", "expires_at", "attempts")})
+    stmt = _insert(email_verifications).values(email=email, name=name, pw_hash=pw_hash, code=code, expires_at=expires_at, attempts=0, username=username)
+    stmt = stmt.on_conflict_do_update(index_elements=["email"], set_={k: stmt.excluded[k] for k in ("name", "pw_hash", "code", "expires_at", "attempts", "username")})
     with conn() as c:
         c.execute(delete(email_verifications).where(email_verifications.c.expires_at < time.time() - 86400))  # tidy up old rows
         c.execute(stmt)
@@ -545,3 +773,132 @@ def verification_bump(email: str) -> int:
 def verification_delete(email: str) -> None:
     with conn() as c:
         c.execute(delete(email_verifications).where(email_verifications.c.email == email))
+
+
+# ---------------- forgot password ----------------
+@_retry
+def reset_put(email: str, code: str, expires_at: float) -> None:
+    stmt = _insert(password_resets).values(email=email, code=code, expires_at=expires_at, attempts=0)
+    stmt = stmt.on_conflict_do_update(index_elements=["email"], set_={k: stmt.excluded[k] for k in ("code", "expires_at", "attempts")})
+    with conn() as c:
+        c.execute(delete(password_resets).where(password_resets.c.expires_at < time.time() - 86400))
+        c.execute(stmt)
+
+
+@_retry
+def reset_get(email: str):
+    with conn() as c:
+        r = c.execute(select(password_resets).where(password_resets.c.email == email)).mappings().first()
+        return dict(r) if r else None
+
+
+@_retry
+def reset_bump(email: str) -> int:
+    with conn() as c:
+        c.execute(update(password_resets).where(password_resets.c.email == email).values(attempts=password_resets.c.attempts + 1))
+        r = c.execute(select(password_resets.c.attempts).where(password_resets.c.email == email)).first()
+        return int(r[0]) if r else 0
+
+
+@_retry
+def reset_delete(email: str) -> None:
+    with conn() as c:
+        c.execute(delete(password_resets).where(password_resets.c.email == email))
+
+
+@_retry
+def set_password(uid: int, pw_hash: str) -> None:
+    """New password. Every session issued before this moment stops working."""
+    with conn() as c:
+        c.execute(update(users).where(users.c.id == uid).values(pw_hash=pw_hash, tokens_valid_after=time.time()))
+
+
+# ---------------- friends / leaderboard / milestones ----------------
+def _card(u) -> dict:
+    return {"id": u["id"], "username": u["username"], "name": u["name"], "xp": u["xp"], "streak": u["streak"],
+            "level": level_of(u["xp"]), "plan": _effective_plan(u)}
+
+
+@_retry
+def friend_request(me: int, username: str) -> str:
+    """Send a friend request by username. If that user already asked me, it becomes a friendship at once.
+    Returns 'requested' | 'accepted'; raises FriendError."""
+    with conn() as c:
+        t = c.execute(select(users.c.id).where(users.c.username == username)).first()
+        if not t:
+            raise FriendError("user_not_found")
+        other = t[0]
+        if other == me:
+            raise FriendError("self")
+        rows = c.execute(select(friendships).where(or_(and_(friendships.c.user_id == me, friendships.c.friend_id == other),
+                                                       and_(friendships.c.user_id == other, friendships.c.friend_id == me)))).mappings().all()
+        for r in rows:
+            if r["status"] == "accepted":
+                raise FriendError("already_friends")
+            if r["user_id"] == me:
+                raise FriendError("already_requested")
+            c.execute(update(friendships).where(friendships.c.user_id == other, friendships.c.friend_id == me).values(status="accepted"))
+            return "accepted"
+        c.execute(friendships.insert().values(user_id=me, friend_id=other, status="pending", created_at=time.time()))
+        return "requested"
+
+
+@_retry
+def friend_accept(me: int, requester_id: int) -> None:
+    with conn() as c:
+        res = c.execute(update(friendships).where(friendships.c.user_id == requester_id, friendships.c.friend_id == me,
+                                                  friendships.c.status == "pending").values(status="accepted"))
+        if not res.rowcount:
+            raise FriendError("not_found")
+
+
+@_retry
+def friend_remove(me: int, other: int) -> bool:
+    """Unfriend, decline or cancel: removes the pair in either direction."""
+    with conn() as c:
+        res = c.execute(delete(friendships).where(or_(and_(friendships.c.user_id == me, friendships.c.friend_id == other),
+                                                      and_(friendships.c.user_id == other, friendships.c.friend_id == me))))
+        return bool(res.rowcount)
+
+
+@_retry
+def friends_overview(me: int) -> dict:
+    with conn() as c:
+        rows = c.execute(select(friendships).where(or_(friendships.c.user_id == me, friendships.c.friend_id == me))).mappings().all()
+        ids = {x for r in rows for x in (r["user_id"], r["friend_id"])} - {me}
+        info = {r["id"]: r for r in c.execute(select(users).where(users.c.id.in_(ids))).mappings()} if ids else {}
+        out = {"friends": [], "incoming": [], "outgoing": []}
+        for r in rows:
+            other = r["friend_id"] if r["user_id"] == me else r["user_id"]
+            if other not in info:
+                continue
+            card = _card(info[other])
+            out["friends" if r["status"] == "accepted" else "incoming" if r["friend_id"] == me else "outgoing"].append(card)
+        return out
+
+
+@_retry
+def leaderboard(me: int, by: str = "xp") -> list:
+    """Me + my accepted friends, ranked by XP or by streak."""
+    with conn() as c:
+        mine = c.execute(select(users).where(users.c.id == me)).mappings().first()
+    rows = friends_overview(me)["friends"] + ([_card(mine)] if mine else [])
+    key = "streak" if by == "streak" else "xp"
+    rows.sort(key=lambda r: (-r[key], -r["xp"], r["username"] or ""))
+    for i, r in enumerate(rows, 1):
+        r["rank"], r["me"] = i, r["id"] == me
+    return rows[:50]
+
+
+@_retry
+def feed(me: int, limit: int = 30) -> list:
+    """Latest milestones of me and my friends."""
+    with conn() as c:
+        fr = c.execute(select(friendships).where(friendships.c.status == "accepted",
+                                                 or_(friendships.c.user_id == me, friendships.c.friend_id == me))).mappings().all()
+        ids = {me} | {r["friend_id"] if r["user_id"] == me else r["user_id"] for r in fr}
+        rows = c.execute(
+            select(milestones.c.kind, milestones.c.value, milestones.c.created_at, users.c.username, users.c.name, users.c.id.label("uid"))
+            .select_from(milestones.join(users, users.c.id == milestones.c.user_id))
+            .where(milestones.c.user_id.in_(ids)).order_by(milestones.c.id.desc()).limit(limit)).mappings().all()
+        return [{**dict(r), "me": r["uid"] == me} for r in rows]

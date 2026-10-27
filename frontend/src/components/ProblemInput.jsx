@@ -40,32 +40,44 @@ export default function ProblemInput({ lang, text, setText, onSubmit, loading })
   const go = () => { if (!loading && (text.trim() || img)) onSubmit(img) }
 
   return (
-    <section className="glass p-5 md:p-8 mt-6">
-      <h2 className="font-display text-2xl md:text-4xl text-ink dark:text-indigo-100 max-w-2xl">{t.hero}</h2>
-      <div className="mt-5 space-y-3">
+    <section className="space-y-6 pb-2">
+      <div className="space-y-4 pt-8 text-center md:pt-12">
+        <span className="chip !px-4 !py-1.5 !text-sm">✨ {t.heroKicker}</span>
+        <h1 className="font-display text-4xl font-extrabold leading-[1.05] text-ink md:text-6xl dark:text-white">
+          {t.heroTitle1} <span className="gradient-text">{t.heroTitle2}</span>
+        </h1>
+        <p className="mx-auto max-w-2xl text-lg text-slate-600 dark:text-slate-300">{t.heroSub}</p>
+        <div className="flex flex-wrap justify-center gap-2">
+          {[t.heroP1, t.heroP2, t.heroP3, t.heroP4].map((p) => (
+            <span key={p} className="rounded-full border border-slate-200/80 bg-white/70 px-3.5 py-1.5 text-sm font-semibold text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200">{p}</span>
+          ))}
+        </div>
+      </div>
+
+      <div className="glass space-y-4 p-5 md:p-8">
         <MathKeypad lang={lang} onInsert={insert} />
-        <div className="flex flex-col md:flex-row gap-3">
+        <div className="flex flex-col gap-3 md:flex-row">
           <textarea ref={areaRef} value={text} onChange={(e) => setText(e.target.value)} rows={3} placeholder={t.ph} aria-label={t.ph}
             onKeyDown={(e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); go() } }}
-            className="flex-1 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-3 text-lg font-mono focus-visible:outline-2 focus-visible:outline-indigo-400" />
-          <div className="flex gap-2 md:flex-col md:w-44">
-            <button className="btn flex-1" disabled={loading || (!text.trim() && !img)} onClick={go}>{loading ? t.analyzing : t.solve}</button>
+            className="field flex-1 font-mono text-lg" />
+          <div className="flex gap-2 md:w-48 md:flex-col">
+            <button className="btn flex-1 !py-3 text-base" disabled={loading || (!text.trim() && !img)} onClick={go}>{loading ? t.analyzing : t.solve}</button>
             <button className="btn-ghost" onClick={() => fileRef.current.click()}>📷 {img ? img.name.slice(0, 12) : t.upload}</button>
             <input ref={fileRef} type="file" accept="image/*" hidden onChange={pick} />
           </div>
         </div>
         {text.trim() && (
-          <div className="rounded-lg bg-slate-50 dark:bg-slate-800/60 px-3 py-2 overflow-x-auto" aria-live="polite">
-            <span className="text-xs text-slate-500 mr-2">{t.preview}</span>
+          <div className="overflow-x-auto rounded-2xl bg-slate-50 px-4 py-2.5 dark:bg-white/5" aria-live="polite">
+            <span className="mr-2 text-xs font-semibold text-slate-500">{t.preview}</span>
             <Tex tex={text} />
           </div>
         )}
-        <div className="text-xs text-slate-500">{t.sendHint}</div>
-      </div>
-      <div className="mt-3 flex flex-wrap gap-2">
-        {t.chips.map((c, i) => (
-          <button key={c} className="btn-ghost text-sm" onClick={() => setText(CHIP_PROBLEMS[i])}>{c}</button>
-        ))}
+        <div className="flex flex-wrap items-center gap-2">
+          {t.chips.map((c, i) => (
+            <button key={c} className="btn-ghost !px-3.5 !py-1.5 text-sm" onClick={() => setText(CHIP_PROBLEMS[i])}>{c}</button>
+          ))}
+          <span className="ml-auto text-xs text-slate-500">{t.sendHint}</span>
+        </div>
       </div>
     </section>
   )

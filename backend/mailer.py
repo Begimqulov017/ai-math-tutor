@@ -40,8 +40,15 @@ _TEXT = {
 }
 
 
-def render(name: str, code: str, lang: str):
-    subject, hello, intro, note = _TEXT.get(lang, _TEXT["en"])
+_RESET = {
+    "uz": ("Parolni tiklash kodi: {code}", "Salom, {name}!", "AI Math Tutor parolini tiklash kodi:", "Kod {minutes} daqiqa amal qiladi. Agar parolni tiklashni siz so'ramagan bo'lsangiz, bu xatni e'tiborsiz qoldiring."),
+    "ru": ("Код для сброса пароля: {code}", "Здравствуйте, {name}!", "Код для сброса пароля AI Math Tutor:", "Код действителен {minutes} мин. Если вы не запрашивали сброс, проигнорируйте это письмо."),
+    "en": ("Password reset code: {code}", "Hello, {name}!", "Your AI Math Tutor password reset code:", "The code is valid for {minutes} minutes. If you did not ask for a reset, ignore this email."),
+}
+
+
+def render(name: str, code: str, lang: str, kind: str = "verify"):
+    subject, hello, intro, note = (_RESET if kind == "reset" else _TEXT).get(lang, (_RESET if kind == "reset" else _TEXT)["en"])
     minutes = max(1, config.OTP_TTL_SECONDS // 60)
     subject, note = subject.format(code=code), note.format(minutes=minutes)
     hello = hello.format(name=name)
@@ -69,11 +76,11 @@ def _smtp_send(to: str, subject: str, text: str, page: str) -> None:
         smtp.send_message(msg)
 
 
-async def send_code(email: str, name: str, code: str, lang: str = "uz") -> None:
+async def send_code(email: str, name: str, code: str, lang: str = "uz", kind: str = "verify") -> None:
     m = mode()
     if m == "none":
         raise MailNotConfigured
-    subject, text, page = render(name, code, lang)
+    subject, text, page = render(name, code, lang, kind)
     if m == "log":  # development: the code is printed in the server console instead of being e-mailed
         log.warning("VERIFICATION CODE for %s: %s", email, code)
         return

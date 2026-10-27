@@ -1,7 +1,9 @@
 import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { T } from './lib/i18n'
-import { analyzeProblem, getGuestStatus, getMe, getSync, login, putSync, register, resendCode, verifyEmail, warmUp } from './lib/api'
+import {
+  analyzeProblem, checkUsername, forgotPassword, getGuestStatus, getMe, getSync, login, putSync, register, resendCode, resetPassword, verifyEmail, warmUp,
+} from './lib/api'
 import { useVoice } from './lib/useVoice'
 import {
   clearAuth, clearData, loadAuth, loadHistory, loadMistakes, mergeData,
@@ -16,6 +18,9 @@ import History from './components/History'
 import Progress from './components/Progress'
 import Auth from './components/Auth'
 import Admin from './components/Admin'
+import Pricing from './components/Pricing'
+import Topics from './components/Topics'
+import Friends from './components/Friends'
 import Practice from './components/Practice'
 import Handwritten from './components/Handwritten'
 import ChatSection from './components/ChatSection'
@@ -31,7 +36,8 @@ export default function App() {
   const [micActive, setMicActive] = useState(false)
   const [text, setText] = useState('')
   const [data, setData] = useState(null)
-  const [screen, setScreen] = useState('home') // 'home' (input) | 'work' (immersive workspace)
+  const [screen, setScreen] = useState('home') // 'home' (pages) | 'work' (immersive workspace)
+  const [page, setPage] = useState('solve') // 'solve' | 'topics' | 'friends'
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [step, setStep] = useState(0)
@@ -40,7 +46,7 @@ export default function App() {
   const [auth, setAuth] = useState(loadAuth) // { token, user } | null  (null = guest mode)
   const [synced, setSynced] = useState(false)
   const [activeId, setActiveId] = useState(null)
-  const [panel, setPanel] = useState(null) // 'history' | 'progress' | 'auth' | 'admin'
+  const [panel, setPanel] = useState(null) // 'history' | 'progress' | 'auth' | 'admin' | 'pricing'
   const [authMode, setAuthMode] = useState('login')
   const [gain, setGain] = useState(null)
   const [guest, setGuest] = useState(null) // { used, limit } for guests
@@ -48,9 +54,11 @@ export default function App() {
   const t = T[lang]
   const { speak, listen, stop } = useVoice(lang)
   const errText = (e) => (e.status === 0 ? t.net : e.message === 'guest_limit' ? t.guestLimit : e.code === 'tokens_exhausted' ? t.tokensOut
-    : e.code === 'wrong_code' ? t.otpWrong.replace('{n}', e.data?.attempts_left ?? '') : e.code === 'code_expired' ? t.otpExpired
+    : e.code === 'password_mismatch' ? t.pwMismatchErr : e.code === 'username_taken' ? t.userTakenErr : e.code === 'bad_username' ? t.userBadErr
+    : e.code === 'email_taken' ? t.emailTaken : e.code === 'wrong_code' ? t.otpWrong.replace('{n}', e.data?.attempts_left ?? '') : e.code === 'code_expired' ? t.otpExpired
     : e.code === 'too_many_attempts' ? t.otpTooMany : e.code === 'resend_wait' ? t.otpWait.replace('{s}', e.data?.retry_after ?? 60)
     : e.code === 'mail_failed' ? t.mailFail : e.code === 'mail_not_configured' ? t.mailOff : e.status === 409 ? t.emailTaken
+    : e.status === 401 ? t.badLogin
     : e.status === 429 || e.status === 503 ? t.busy : t.err + ': ' + String(e.message).slice(0, 200))
 
   useEffect(() => { document.documentElement.classList.toggle('dark', dark) }, [dark])
@@ -105,9 +113,12 @@ export default function App() {
     setPanel(null)
   }
   // log in, or sign up step 1 (a 6-digit code is e-mailed; the account exists only after step 2)
-  const handleAuth = async (mode, name, email, password) => {
+  const handleAuth = async (mode, p) => {
     let r
-    try { r = await (mode === 'login' ? login({ email, password }) : register({ name, email, password, lang })) } catch (e) { throw new Error(errText(e)) }
+    try {
+      r = await (mode === 'login' ? login({ email: p.email, password: p.password })
+        : register({ name: p.name, username: p.username, email: p.email, password: p.password, password_confirm: p.confirm, lang }))
+    } catch (e) { throw new Error(errText(e)) }
     if (r.token) { await finishLogin(r); return { done: true } } // logged in (or verification is switched off on the server)
     return { pending: true, email: r.email, resend_after: r.resend_after }
   }
@@ -119,30 +130,37 @@ export default function App() {
   const handleResend = async (email) => {
     try { return await resendCode({ email, lang }) } catch (e) { throw new Error(errText(e)) }
   }
+  const handleForgot = async (email) => { // forgot password, step 1: e-mail a 6-digit code
+    try { return await forgotPassword({ email, lang }) } catch (e) { throw new Error(errText(e)) }
+  }
+  const handleReset = async ({ email, code, password, confirm }) => { // step 2: code + new password
+    try { await resetPassword({ email, code, password, password_confirm: confirm }) } catch (e) { throw new Error(errText(e)) }
+  }
   const logout = async () => {
     try { await putSync({ history, mistakes }) } catch { /* offline: the last debounced sync stays */ }
     localLogout(); clearData()
-    setHistory([]); setMistakes([]); setData(null); setActiveId(null); setScreen('home'); setPanel(null)
+    setHistory([]); setMistakes([]); setData(null); setActiveId(null); setScreen('home'); setPage('solve'); setPanel(null)
   }
 
   // ---- solving ----
-  const submit = async (img) => {
+  const submit = async (img, override) => {
+    const problem = override ?? text
     setLoading(true); setError('')
     setData(null); setStep(0); setScreen('work') // the immersive workspace opens at once; a skeleton shows while the AI works
     window.scrollTo({ top: 0 })
     try {
-      const { progress, guest: g, ...view } = await analyzeProblem({ text, lang, image_base64: img?.data ?? null, image_mime: img?.mime ?? 'image/png' })
+      const { progress, guest: g, ...view } = await analyzeProblem({ text: problem, lang, image_base64: img?.data ?? null, image_mime: img?.mime ?? 'image/png' })
       setData(view)
       if (view.demo) setActiveId(null)
       else {
         const id = Date.now()
         setActiveId(id)
-        updHistory((h) => [{ id, ts: id, text, data: view }, ...h])
+        updHistory((h) => [{ id, ts: id, text: problem, data: view }, ...h])
       }
       if (g) setGuest(g)
       if (progress) { applyUser(progress.user); showGain(progress.xp_gained) }
     } catch (e) {
-      setScreen('home') // back to the input with a clear message
+      setScreen('home'); setPage('solve') // back to the input with a clear message
       if (e.message === 'guest_limit') { // this IP used all its free problems
         setGuest((x) => ({ limit: x?.limit || 3, used: x?.limit || 3 }))
         openAuth('register')
@@ -160,6 +178,7 @@ export default function App() {
   const newProblem = () => { setData(null); setText(''); setActiveId(null); setScreen('home'); setPanel(null) }
   const removeItem = (id) => { updHistory((h) => h.filter((i) => i.id !== id)); if (id === activeId) setActiveId(null) }
   const clearAll = () => { updHistory(() => []); setActiveId(null) }
+  const startTopic = (q) => { setText(q); setPage('solve'); submit(null, q) }
   const openChat = () => { setScreen('work'); setPanel(null); setTimeout(scrollToChat, 350) }
 
   const onPractice = ({ level, index, q, userAnswer, user: u, xpGained, firstWrong }) => {
@@ -180,14 +199,17 @@ export default function App() {
   return (
     <>
       {screen === 'home' && (
-        <Navbar {...{ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, user }} onMic={toggleMic}
-          onHistory={() => setPanel('history')} onProgress={() => setPanel('progress')} onChat={openChat} onLogin={openAuth} />
+        <Navbar {...{ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, user, page, setPage }} onMic={toggleMic}
+          onHistory={() => setPanel('history')} onProgress={() => setPanel('progress')} onChat={openChat} onLogin={openAuth}
+          onUpgrade={() => setPanel('pricing')} onLogout={logout} />
       )}
       <History lang={lang} open={panel === 'history'} onClose={closePanel} items={history} activeId={activeId}
         onOpen={openItem} onDelete={removeItem} onClear={clearAll} onNew={newProblem} />
       <Progress lang={lang} open={panel === 'progress'} onClose={closePanel} user={user} mistakes={mistakes}
         onFixed={fixMistake} onDelete={deleteMistake} onLogin={openAuth} />
-      <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={closePanel} onSubmit={handleAuth} onVerify={handleVerify} onResend={handleResend} user={user} onLogout={logout} />
+      <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={closePanel} onSubmit={handleAuth} onVerify={handleVerify} onResend={handleResend}
+        onForgot={handleForgot} onReset={handleReset} onCheckUsername={checkUsername} user={user} onLogout={logout} />
+      <Pricing lang={lang} open={panel === 'pricing'} onClose={closePanel} user={user} />
       <Admin open={panel === 'admin'} onClose={closePanel} />
 
       <AnimatePresence>
@@ -200,26 +222,32 @@ export default function App() {
       </AnimatePresence>
 
       {screen === 'home' && (
-        <main className="mx-auto max-w-6xl px-4 pb-16 space-y-5">
-          {!user && (
-            <div className="print:hidden glass mt-4 px-4 py-3 flex flex-wrap items-center gap-3 !border-indigo-300 dark:!border-indigo-800">
-              <span className="text-xl" aria-hidden="true">🔒</span>
-              <p className="flex-1 min-w-56 text-sm">
-                {t.guestNote}
-                {guest?.limit > 0 && (
-                  <span className={`block font-bold mt-0.5 ${guest.used >= guest.limit ? 'text-rose-600' : 'text-indigo-600 dark:text-indigo-300'}`}>
-                    {t.guestCount.replace('{u}', guest.used).replace('{l}', guest.limit)}
-                  </span>
-                )}
-              </p>
-              <button className="btn text-sm" onClick={() => openAuth('register')}>{t.reg}</button>
-              <button className="btn-ghost text-sm" onClick={() => openAuth('login')}>{t.login}</button>
+        <main className="mx-auto max-w-6xl px-4 pb-16">
+          {page === 'solve' && (
+            <div className="space-y-5">
+              {!user && (
+                <div className="print:hidden glass mt-4 flex flex-wrap items-center gap-3 px-5 py-3.5">
+                  <span className="text-xl" aria-hidden="true">🔒</span>
+                  <p className="min-w-56 flex-1 text-sm">
+                    {t.guestNote}
+                    {guest?.limit > 0 && (
+                      <span className={`mt-0.5 block font-bold ${guest.used >= guest.limit ? 'text-rose-600' : 'text-indigo-600 dark:text-indigo-300'}`}>
+                        {t.guestCount.replace('{u}', guest.used).replace('{l}', guest.limit)}
+                      </span>
+                    )}
+                  </p>
+                  <button className="btn text-sm" onClick={() => openAuth('register')}>{t.reg}</button>
+                  <button className="btn-ghost text-sm" onClick={() => openAuth('login')}>{t.login}</button>
+                </div>
+              )}
+              <div className="print:hidden"><ProblemInput {...{ lang, text, setText, loading }} onSubmit={submit} /></div>
+              {error && <p role="alert" className="rounded-2xl bg-rose-50 px-4 py-3 font-semibold text-rose-700 dark:bg-rose-500/10 dark:text-rose-300">{error}</p>}
+              {data && <button className="btn-ghost" onClick={() => setScreen('work')}>↩ {t.resume}</button>}
             </div>
           )}
-          <ProblemInput {...{ lang, text, setText, loading }} onSubmit={submit} />
-          {error && <p role="alert" className="text-rose-600 font-bold">{error}</p>}
-          {data && <button className="btn-ghost" onClick={() => setScreen('work')}>↩ {t.resume}</button>}
-          <footer className="pt-8 text-center">
+          {page === 'topics' && <div className="pt-8"><Topics lang={lang} onStart={startTopic} /></div>}
+          {page === 'friends' && <div className="pt-8"><Friends lang={lang} user={user} onLogin={openAuth} /></div>}
+          <footer className="pt-10 text-center">
             <button className="text-xs text-slate-400 hover:text-slate-600" onClick={() => setPanel('admin')} aria-label="Admin">⚙</button>
           </footer>
         </main>
@@ -267,7 +295,7 @@ export default function App() {
               </>
             )}
             {!(loading && !data) && (
-              <ChatSection lang={lang} user={user} data={data} step={step} voiceOn={voiceOn} speak={speak} listen={listen} onLogin={openAuth} />
+              <ChatSection lang={lang} user={user} data={data} step={step} voiceOn={voiceOn} speak={speak} listen={listen} onLogin={openAuth} onUser={applyUser} />
             )}
           </Workspace>
         )}

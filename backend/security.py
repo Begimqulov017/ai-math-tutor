@@ -25,22 +25,30 @@ def verify_password(pw: str, hashed: str) -> bool:
 
 
 def make_token(uid: int) -> str:
-    return jwt.encode({"sub": str(uid), "exp": int(time.time()) + config.JWT_DAYS * 86400}, config.JWT_SECRET, algorithm="HS256")
+    now = int(time.time())
+    # "ts" has sub-second precision: a password reset voids exactly the sessions created before it, not the new login
+    return jwt.encode({"sub": str(uid), "iat": now, "ts": time.time(), "exp": now + config.JWT_DAYS * 86400}, config.JWT_SECRET, algorithm="HS256")
 
 
-def _uid(authorization: str | None) -> int | None:
+def _claims(authorization: str | None):
     if not authorization or not authorization.lower().startswith("bearer "):
         return None
     try:
-        return int(jwt.decode(authorization[7:].strip(), config.JWT_SECRET, algorithms=["HS256"])["sub"])
+        p = jwt.decode(authorization[7:].strip(), config.JWT_SECRET, algorithms=["HS256"])
+        return int(p["sub"]), float(p.get("ts") or p.get("iat") or 0)
     except (jwt.PyJWTError, ValueError, KeyError):
         return None
 
 
+def optional_user(authorization: str | None = Header(None)) -> dict | None:
+    """Guest mode: no / invalid / revoked token simply means 'guest'. Returns the public user dict otherwise."""
+    c = _claims(authorization)
+    return db.auth_user(c[0], c[1]) if c else None
+
+
 def optional_user_id(authorization: str | None = Header(None)) -> int | None:
-    """Guest mode: no/invalid token simply means 'guest'."""
-    uid = _uid(authorization)
-    return uid if uid is not None and db.get_user(uid) else None
+    u = optional_user(authorization)
+    return u["id"] if u else None
 
 
 def required_user_id(authorization: str | None = Header(None)) -> int:

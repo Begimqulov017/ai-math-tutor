@@ -13,7 +13,7 @@ def analysis(problem):
             "variations": [], "practice": {"easy": [], "medium": [], "hard": []}, "is_geometry": False, "geometry_svg_or_coords": None}
 
 calls = []
-async def fake_gemini(parts, system, as_json, history=None):
+async def fake_gemini(parts, system, as_json, history=None, model=None):
     calls.append({"system": system, "history": history, "text": parts[0].get("text", ""), "json": as_json})
     if as_json:
         prob = parts[-1]["text"]
@@ -53,8 +53,8 @@ with TestClient(main.app, raise_server_exceptions=False) as c:
     yesterday = db._today_date() - timedelta(days=1)
     with db.conn() as cn: cn.execute(update(db.users).values(tokens_remaining=3, last_token_reset=yesterday))
     assert c.get("/api/me", headers=H).json()["user"]["tokens_remaining"] == 50                 # new day -> 50
-    with db.conn() as cn: cn.execute(update(db.users).values(tokens_remaining=200, last_token_reset=yesterday))
-    assert c.get("/api/me", headers=H).json()["user"]["tokens_remaining"] == 200                # admin grant is not wiped
+    with db.conn() as cn: cn.execute(update(db.users).values(tokens_remaining=3, bonus_tokens=150, last_token_reset=yesterday))
+    assert c.get("/api/me", headers=H).json()["user"]["tokens_remaining"] == 200                # pool refilled to 50, admin bonus (150) is kept
     with db.conn() as cn: cn.execute(update(db.users).values(tokens_remaining=50))
     print("daily reset: OK")
 

@@ -79,7 +79,7 @@ print("/api/tts: voices / cache / validation / failure / rate limit OK")
 
 # ======================= 3) e-mail OTP =======================
 sent = []
-async def fake_send(email, name, code, lang): sent.append(dict(email=email, name=name, code=code, lang=lang))
+async def fake_send(email, name, code, lang, kind="verify"): sent.append(dict(email=email, name=name, code=code, lang=lang, kind=kind))
 main.send_code = fake_send
 def reg(c, email="ali@test.uz", name="Ali", pw="secret1", lang="uz"):
     fresh(); return c.post("/api/auth/register", json={"name": name, "email": email, "password": pw, "lang": lang})

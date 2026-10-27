@@ -66,7 +66,22 @@ export const deleteThread = (id) => call('DELETE', `/api/chat/threads/${id}`)
 export const adminLogin = (password) => call('POST', '/api/admin/login', { password })
 export const adminUsers = (token, q = '', offset = 0) =>
   call('GET', `/api/admin/users?q=${encodeURIComponent(q)}&limit=50&offset=${offset}`, null, 0, token)
-export const adminAddTokens = (token, id, amount) => call('POST', `/api/admin/users/${id}/tokens`, { amount }, 0, token)
+export const adminAdjustTokens = (token, id, amount) => call('POST', `/api/admin/users/${id}/tokens`, { amount }, 0, token) // amount < 0 subtracts
+export const adminSetPlan = (token, id, plan, days) => call('POST', `/api/admin/users/${id}/plan`, { plan, days }, 0, token)
+export const adminStats = (token) => call('GET', '/api/admin/stats', null, 0, token)
+
+// accounts: username check + forgot password
+export const checkUsername = (u) => call('GET', `/api/auth/username-available?u=${encodeURIComponent(u)}`)
+export const forgotPassword = (p) => call('POST', '/api/auth/forgot', p)
+export const resetPassword = (p) => call('POST', '/api/auth/reset', p)
+
+// friends
+export const getFriends = () => call('GET', '/api/friends', null, 2)
+export const friendRequest = (username) => call('POST', '/api/friends/request', { username })
+export const friendAccept = (id) => call('POST', `/api/friends/${id}/accept`)
+export const friendRemove = (id) => call('DELETE', `/api/friends/${id}`)
+export const getLeaderboard = (by) => call('GET', `/api/leaderboard?by=${by}`, null, 2)
+export const getFeed = () => call('GET', '/api/feed', null, 2)
 
 export const fileToBase64 = (file) =>
   new Promise((res, rej) => {

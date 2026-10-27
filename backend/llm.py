@@ -1,9 +1,11 @@
 """Gemini access: round-robin key balancer with failover + tolerant JSON parsing."""
+import asyncio
 import json
 import logging
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 
 import httpx
 from fastapi import HTTPException
@@ -11,7 +13,24 @@ from fastapi import HTTPException
 import config
 
 log = logging.getLogger("mathtutor.llm")
-URL = f"https://generativelanguage.googleapis.com/v1beta/models/{config.MODEL}:generateContent"
+def _url(model: str) -> str:
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+# "Priority AI responses": every plan has its own lane of simultaneous AI calls. When the service is busy, free users
+# wait in the free lane only, so they can never hold up Premium / VIP users (and VIP never waits behind Premium).
+_lanes = {p: asyncio.Semaphore(config.LLM_LANE_SIZE) for p in ("free", "premium", "vip")}
+
+
+@asynccontextmanager
+async def lane(plan: str):
+    async with _lanes.get(plan, _lanes["free"]):
+        yield
+
+
+def model_for(plan: str) -> str:
+    return {"premium": config.PREMIUM_MODEL, "vip": config.VIP_MODEL}.get(plan, config.MODEL)
+
 
 # HTTP status -> seconds the key rests before it is preferred again. Anything else (e.g. 400) is the
 # request's fault and would fail on every key, so it is not retried.
@@ -53,7 +72,7 @@ class APIKeyBalancer:
 balancer = APIKeyBalancer()
 
 
-async def gemini(parts: list, system: str, as_json: bool, history: list | None = None) -> str:
+async def gemini(parts: list, system: str, as_json: bool, history: list | None = None, model: str | None = None) -> str:
     if not balancer.total:
         raise HTTPException(503, "AI service is not configured")
     body = {
@@ -61,11 +80,12 @@ async def gemini(parts: list, system: str, as_json: bool, history: list | None =
         "contents": [*(history or []), {"role": "user", "parts": parts}],
         "generationConfig": {"temperature": 0.3, **({"responseMimeType": "application/json"} if as_json else {})},
     }
+    url = _url(model or config.MODEL)
     async with httpx.AsyncClient(timeout=120) as client:
         for key in balancer.order():
             tag = "..." + key[-4:]
             try:
-                r = await client.post(URL, params={"key": key}, json=body)
+                r = await client.post(url, params={"key": key}, json=body)
             except httpx.HTTPError as e:  # network problem: try the next key
                 log.warning("key %s network error %s", tag, e.__class__.__name__)
                 balancer.rest(key, 10)

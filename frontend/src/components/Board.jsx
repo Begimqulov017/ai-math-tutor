@@ -94,6 +94,58 @@ function Diagram({ spec, focus = [] }) {
   )
 }
 
+// ---- function graphs (Premium / VIP): expressions are whitelisted before being compiled ----
+function compile(expr) {
+  let src = String(expr).toLowerCase().replace(/\s+/g, '').replace(/×/g, '*').replace(/·/g, '*')
+  src = src.replace(/(\d)(x|\()/g, '$1*$2').replace(/(x|\))(\d|\(|x)/g, '$1*$2').replace(/\^/g, '**')
+  const body = src.replace(/\b(sin|cos|tan|sqrt|abs|ln|log|exp|pi|e)\b/g, (m) =>
+    ({ pi: 'Math.PI', e: 'Math.E', ln: 'Math.log', log: 'Math.log10' }[m] || 'Math.' + m))
+  const rest = body.replace(/Math\.(PI|E|log10|log|sin|cos|tan|sqrt|abs|exp)/g, '')
+  if (/[^0-9x+\-*/().,]/.test(rest)) return null
+  try { const f = new Function('x', `return (${body})`); f(1); return f } catch { return null }
+}
+const COLORS = ['#38bdf8', '#a78bfa', '#34d399']
+
+function Graph({ spec }) {
+  const fns = (spec.functions || []).map((f) => ({ ...f, fn: compile(f.expr) })).filter((f) => f.fn)
+  if (!fns.length) return null
+  const x0 = Number(spec.xmin ?? -5), x1 = Number(spec.xmax ?? 5), sx = x1 - x0
+  if (!(sx > 0)) return null
+  const N = 240
+  const lines = fns.map((f) => Array.from({ length: N + 1 }, (_, i) => {
+    const x = x0 + (sx * i) / N
+    let y; try { y = f.fn(x) } catch { y = NaN }
+    return [x, Number.isFinite(y) ? y : null]
+  }))
+  const pts = (spec.points || []).filter((p) => Number.isFinite(+p.x) && Number.isFinite(+p.y))
+  const ys = [...lines.flat().map((p) => p[1]).filter((v) => v !== null), ...pts.map((p) => +p.y), 0]
+  let y0 = Math.max(Math.min(...ys), -4 * sx), y1 = Math.min(Math.max(...ys), 4 * sx)
+  if (y1 - y0 < 1e-6) { y0 -= 1; y1 += 1 }
+  const pd = (y1 - y0) * 0.1; y0 -= pd; y1 += pd
+  const W = 400, H = 260, m = 24
+  const X = (x) => m + ((x - x0) / sx) * (W - 2 * m), Y = (y) => H - m - ((y - y0) / (y1 - y0)) * (H - 2 * m)
+  const step = (r) => (r <= 10 ? 1 : r <= 20 ? 2 : Math.ceil(r / 10))
+  const ticks = (a, b) => { const st = step(b - a), out = []; for (let v = Math.ceil(a / st) * st; v <= b; v += st) out.push(v); return out }
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-h-80" role="img" aria-label="function graph">
+      {ticks(x0, x1).map((v) => <g key={'x' + v}><line x1={X(v)} x2={X(v)} y1={m / 2} y2={H - m / 2} stroke="currentColor" opacity=".12" /><text x={X(v)} y={Y(0) + 11} fontSize="9" textAnchor="middle" fill="currentColor" opacity=".7">{v !== 0 ? v : ''}</text></g>)}
+      {ticks(y0, y1).map((v) => <g key={'y' + v}><line y1={Y(v)} y2={Y(v)} x1={m / 2} x2={W - m / 2} stroke="currentColor" opacity=".12" /><text y={Y(v) + 3} x={X(0) - 4} fontSize="9" textAnchor="end" fill="currentColor" opacity=".7">{v !== 0 ? v : ''}</text></g>)}
+      <line x1={m / 2} x2={W - m / 2} y1={Y(0)} y2={Y(0)} stroke="currentColor" strokeWidth="1.2" />
+      <line y1={m / 2} y2={H - m / 2} x1={X(0)} x2={X(0)} stroke="currentColor" strokeWidth="1.2" />
+      {lines.map((pl, i) => {
+        let d = '', pen = false
+        pl.forEach(([x, y]) => {
+          if (y === null || y < y0 || y > y1) { pen = false; return }
+          d += `${pen ? 'L' : 'M'}${X(x).toFixed(1)},${Y(y).toFixed(1)} `; pen = true
+        })
+        return <path key={i} d={d} fill="none" stroke={COLORS[i % 3]} strokeWidth="2" strokeLinejoin="round" />
+      })}
+      {fns.map((f, i) => f.label && <text key={i} x={W - m} y={m + i * 13} fontSize="10" textAnchor="end" fill={COLORS[i % 3]}>{f.label}</text>)}
+      {pts.map((p, i) => <g key={i}><circle cx={X(+p.x)} cy={Y(+p.y)} r="3.5" fill={FOCUS} /><text x={X(+p.x) + 6} y={Y(+p.y) - 6} fontSize="10" fontWeight="700" fill={FOCUS}>{p.label}</text></g>)}
+    </svg>
+  )
+}
+
 export default function Board({ lang, data, step }) {
   const t = T[lang]
   const s = data.steps?.[step]
@@ -103,6 +155,7 @@ export default function Board({ lang, data, step }) {
       <h3 className="font-bold mb-3 text-slate-300">🧑‍🏫 {t.board}</h3>
       <div className="text-2xl overflow-x-auto"><Tex tex={data.problem} block /></div>
       {showDiagram && <Safe><div className="mt-3"><Diagram spec={data.geometry_svg_or_coords} focus={s?.focus || []} /></div></Safe>}
+      {data.graph && <Safe><div className="mt-3"><Graph spec={data.graph} /></div></Safe>}
       {s && (
         <div className="mt-3 pt-3 border-t border-dashed border-slate-600 text-xl overflow-x-auto">
           <span className="text-sm text-slate-400 mr-2">{step + 1}/{data.steps.length}</span>

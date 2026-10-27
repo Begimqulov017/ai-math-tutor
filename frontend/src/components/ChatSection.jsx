@@ -6,7 +6,7 @@ import { unlockAudio } from '../lib/useVoice'
 
 /** Persistent, topic-aware chat. Logged-in users: threads + messages live in the database and the AI remembers
  *  the topic and the conversation of the open thread. Guests: a temporary chat that is not saved. */
-export default function ChatSection({ lang, user, data, step, voiceOn, speak, listen, onLogin }) {
+export default function ChatSection({ lang, user, data, step, voiceOn, speak, listen, onLogin, onUser }) {
   const t = T[lang]
   const loggedIn = !!user
   const [threads, setThreads] = useState([])
@@ -83,11 +83,12 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
         setMsgs((m) => [...m, mine])
         const r = await sendThreadMessage(id, { content, lang, context })
         setMsgs((m) => [...m.filter((x) => x.id !== mine.id), r.message, r.reply])
+        if (r.user) onUser?.(r.user) // the token balance changes every 3rd message
         refreshThreads()
         if (voiceOn) speak(r.reply.content)
       } catch (e) {
         setMsgs((m) => m.filter((x) => x.id !== mine.id)); setVal(content)
-        setErr(e.status === 0 ? t.net : e.status === 429 || e.status === 503 ? t.busy : t.err)
+        setErr(e.status === 0 ? t.net : e.code === 'tokens_exhausted' ? t.tokensOut : e.status === 429 || e.status === 503 ? t.busy : t.err)
       }
     } else {
       setGuestMsgs((m) => [...m, mine])
@@ -149,6 +150,7 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
               {t.chatChips.map((c) => <button key={c} className="btn-ghost text-sm" onClick={() => { unlockAudio(); send(c) }}>{c}</button>)}
             </div>
           )}
+          {loggedIn && <p className="mt-2 text-xs text-slate-500">⚡ {t.chatCost.replace('{n}', user.chat_until_charge ?? 3)}</p>}
           {err && <p role="alert" className="text-rose-600 text-sm font-bold mt-2">{err}</p>}
           <div className="mt-3 flex gap-2">
             <button className="btn-ghost" aria-label={t.mic} title={t.mic} onClick={() => { unlockAudio(); listen((x) => send(x)) }}>🎤</button>
