@@ -58,10 +58,34 @@ export function stopSpeaking() {
   try { window.speechSynthesis?.cancel() } catch { /* ignore */ }
 }
 
-function browserSpeak(text, lang) { // secondary fallback: the voices installed in the browser (no Uzbek on most devices)
+// Clean math & phonetic variables for browser fallback so even offline fallback says "iks" instead of "h"
+function formatFallbackSpeech(text, lang) {
+  let s = String(text || '')
+    .replace(/\$/g, ' ')
+    .replace(/\\frac\{([^{}]*)\}\{([^{}]*)\}/g, lang === 'ru' ? ' дробь $1 делённое на $2 ' : lang === 'en' ? ' $1 over $2 ' : " kasr $1 bo'lingan $2 ")
+    .replace(/\\sqrt\{([^{}]*)\}/g, lang === 'ru' ? ' корень из $1 ' : lang === 'en' ? ' square root of $1 ' : ' ildiz ostida $1 ')
+    .replace(/\^2(?!\d)|\^\{2\}/g, lang === 'ru' ? ' в квадрате ' : lang === 'en' ? ' squared ' : ' kvadrat ')
+    .replace(/\^3(?!\d)|\^\{3\}/g, lang === 'ru' ? ' в кубе ' : lang === 'en' ? ' cubed ' : ' kub ')
+    .replace(/=/g, lang === 'ru' ? ' равно ' : lang === 'en' ? ' equals ' : ' teng ')
+    .replace(/\+/g, lang === 'ru' ? ' плюс ' : lang === 'en' ? ' plus ' : " qo'shuv ")
+    .replace(/(?<=\s|-|^)-(?=\s|\d|[a-zA-Z])/g, lang === 'ru' ? ' минус ' : lang === 'en' ? ' minus ' : ' minus ')
+    .replace(/\\[a-zA-Z]+/g, ' ')
+    .replace(/[{}]/g, ' ')
+  if (lang === 'uz') {
+    s = s.replace(/(?<=\d)([xXyYzZ])\b/g, ' $1')
+    s = s.replace(/\b[xX]\b/g, 'iks').replace(/\b[yY]\b/g, 'igrek').replace(/\b[zZ]\b/g, 'zet')
+  } else if (lang === 'ru') {
+    s = s.replace(/(?<=\d)([xXyYzZ])\b/g, ' $1')
+    s = s.replace(/\b[xX]\b/g, 'икс').replace(/\b[yY]\b/g, 'игрек').replace(/\b[zZ]\b/g, 'зет')
+  }
+  return s.replace(/\s+/g, ' ').trim()
+}
+
+function browserSpeak(text, lang) { // secondary fallback: the voices installed in the browser
   try {
     if (!('speechSynthesis' in window) || !text) return
-    const u = new SpeechSynthesisUtterance(text.replace(/\$/g, '').replace(/\\[a-zA-Z]+/g, ' '))
+    const spoken = formatFallbackSpeech(text, lang)
+    const u = new SpeechSynthesisUtterance(spoken)
     u.lang = SPEECH[lang] || 'en-US'
     window.speechSynthesis.cancel()
     window.speechSynthesis.speak(u)
@@ -74,7 +98,7 @@ export async function speakText(text, lang = 'uz') {
   if (!clean) return
   stopSpeaking()
   const my = seq
-  const key = lang + '|' + clean
+  const key = lang + '|v2|' + clean
   try {
     let blob = blobCache.get(key)
     if (!blob) {

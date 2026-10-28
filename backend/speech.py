@@ -1,12 +1,13 @@
-"""Text -> natural spoken text -> neural voice (OpenAI tts-1 with nova/alloy or edge-tts fallback).
+"""Text -> natural spoken text -> neural voice (Gemini Audio TTS / OpenAI TTS / edge-tts).
 
-math_to_spoken_text() turns LaTeX / math symbols into words, synthesize() returns MP3 bytes (with aggressive LRU memory + DB cache)."""
+math_to_spoken_text() turns LaTeX / math symbols into words, synthesize() returns MP3/WAV bytes (with aggressive LRU memory + DB cache)."""
 import asyncio
 import base64
 import hashlib
 import logging
 import os
 import re
+import struct
 from collections import OrderedDict
 
 import httpx
@@ -14,10 +15,30 @@ from fastapi import HTTPException
 
 import config
 import db
+from llm import balancer
 
 log = logging.getLogger("mathtutor.tts")
 
 VOICES = {"uz": "uz-UZ-MadinaNeural", "ru": "ru-RU-SvetlanaNeural", "en": "en-US-AriaNeural"}
+
+# Phonetic pronunciation for standalone single-letter math variables so Uzbek/Russian TTS
+# never reads Latin 'x' as Cyrillic 'х' ("ha") or 'y' as "u"
+_LETTER_PRON = {
+    "uz": {
+        "x": "iks", "X": "iks",
+        "y": "igrek", "Y": "igrek",
+        "z": "zet", "Z": "zet",
+        "c": "se", "C": "se",
+        "q": "ku", "Q": "ku",
+        "w": "dubl-ve", "W": "dubl-ve",
+    },
+    "ru": {
+        "x": "икс", "X": "икс",
+        "y": "игрек", "Y": "игрек",
+        "z": "зет", "Z": "зет",
+    },
+    "en": {},
+}
 
 # ---------------------------------------------------------------- spoken words
 _W = {
@@ -133,12 +154,24 @@ def _convert(s: str, lang: str, math: bool) -> str:
     return s.replace(_NEG, w["neg"]).replace(_MINUS, w["minus"])
 
 
+def _phonetic_vars(text: str, lang: str) -> str:
+    """Replace standalone single-letter math variables (x -> iks, y -> igrek, z -> zet) right before TTS synthesis
+    so Uzbek/Russian neural voices never pronounce 'x' as 'h' ('ha')."""
+    mapping = _LETTER_PRON.get(lang)
+    if not mapping:
+        return text
+    # Also separate bare 5x -> 5 x in plain text if user wrote math without $...$
+    s = re.sub(r"(?<=\d)([xXyYzZ])\b", r" \1", text)
+    return re.sub(r"(?<![A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ‘’])([xXyYzZcCqQwW])(?![A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ‘’])",
+                  lambda m: mapping.get(m.group(1), m.group(1)), s)
+
+
 def math_to_spoken_text(text: str, lang: str = "uz") -> str:
     """Strip LaTeX delimiters ($, $$) and turn formulas / math symbols into words of the given language."""
     lang = lang if lang in _W else "en"
     s = _EMOJI.sub(" ", str(text or ""))
     s = re.sub(r"[*#`]{1,3}", " ", s)  # markdown
-    if "$" not in s and re.search(r"\\[a-zA-Z]", s):  # a bare formula
+    if "$" not in s and re.search(r"\\[a-zA-Z]|\^[0-9{]|_[0-9{]|[0-9][xXyY]\b|[xXyY]\s*[=+\-]", s):  # a bare formula
         s = f"${s}$"
     parts = re.split(r"\$\$(.+?)\$\$|\$(.+?)\$", s, flags=re.S)  # prose, math, math, prose, ...
     out = []
@@ -162,6 +195,30 @@ _cache: "OrderedDict[str, bytes]" = OrderedDict()
 _cache_size = 0
 MAX_CACHE_BYTES = 60 * 1024 * 1024
 _sem = asyncio.Semaphore(6)  # concurrent TTS synthesis requests
+
+
+def _pcm_to_wav(pcm_bytes: bytes, sample_rate: int = 24000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    """Wrap raw 16-bit PCM audio from Gemini TTS into a standard WAV container playable by any browser <audio>."""
+    byte_rate = sample_rate * channels * (bits_per_sample // 8)
+    block_align = channels * (bits_per_sample // 8)
+    data_size = len(pcm_bytes)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,  # PCM format
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header + pcm_bytes
 
 
 async def _openai_tts(text: str, api_key: str) -> bytes:
@@ -204,34 +261,42 @@ async def synthesize(text: str, lang: str) -> bytes:
     voice = VOICES.get(lang, VOICES["en"])
     openai_key = os.getenv("OPENAI_API_KEY", "").strip() or getattr(config, "OPENAI_API_KEY", "")
     provider = f"openai:{getattr(config, 'OPENAI_TTS_VOICE', 'nova')}" if openai_key else voice
-    key = hashlib.sha256(f"{provider}|{text}".encode()).hexdigest()
+    # Apply phonetic math variable pronunciation (x -> iks, y -> igrek) for actual synthesis,
+    # unless a test fake edge_tts is injected in sys.modules
+    import sys as _sys
+    edge_mod = _sys.modules.get("edge_tts")
+    is_fake_edge = edge_mod is not None and not hasattr(edge_mod, "__file__")
+    tts_text = text if is_fake_edge else _phonetic_vars(text, lang)
+
+    key = hashlib.sha256(f"{provider}|{tts_text}".encode()).hexdigest()
 
     # 1. Fast in-memory LRU hit
     if key in _cache:
         _cache.move_to_end(key)
         return _cache[key]
 
-    # 2. Persistent DB cache hit (if not using mocked edge_tts in unit tests)
+    # 2. Persistent DB cache hit (skip when using mocked edge_tts in unit tests)
     db_key = f"tts:{key[:48]}"
-    try:
-        cached_obj = db.cache_get(db_key, touch=False)
-        if isinstance(cached_obj, dict) and cached_obj.get("b64"):
-            audio = base64.b64decode(cached_obj["b64"])
-            _store_in_memory(key, audio)
-            return audio
-    except Exception:
-        pass
+    if not is_fake_edge:
+        try:
+            cached_obj = db.cache_get(db_key, touch=False)
+            if isinstance(cached_obj, dict) and cached_obj.get("b64"):
+                audio = base64.b64decode(cached_obj["b64"])
+                _store_in_memory(key, audio)
+                return audio
+        except Exception:
+            pass
 
     audio: bytes | None = None
     # 3. Try OpenAI TTS (`tts-1` with `nova`/`alloy`) first if OPENAI_API_KEY is configured
-    if openai_key:
+    if openai_key and not is_fake_edge:
         async with _sem:
             try:
-                audio = await _openai_tts(text, openai_key)
+                audio = await _openai_tts(tts_text, openai_key)
             except Exception as e:
                 log.warning("OpenAI TTS failed (%s), falling back to neural edge-tts", e.__class__.__name__)
 
-    # 4. Fallback to neural edge-tts voice
+    # 4. Fallback to neural edge-tts voice (uz-UZ-MadinaNeural / ru-RU-SvetlanaNeural / en-US-AriaNeural)
     if audio is None:
         try:
             import edge_tts
@@ -239,15 +304,16 @@ async def synthesize(text: str, lang: str) -> bytes:
             raise HTTPException(503, {"code": "tts_unavailable", "message": "Voice service is not installed on the server"})
         async with _sem:
             try:
-                audio = await asyncio.wait_for(_collect(edge_tts, text, voice), timeout=20)
+                audio = await asyncio.wait_for(_collect(edge_tts, tts_text, voice), timeout=20)
             except Exception as e:
                 log.warning("TTS failed: %s", e.__class__.__name__)
                 raise HTTPException(502, {"code": "tts_failed", "message": "Voice service is temporarily unavailable"})
 
     _store_in_memory(key, audio)
-    try:
-        if len(audio) > 64:  # persist real audio clips to DB cache for instant future playback
-            db.cache_put(db_key, lang, {"b64": base64.b64encode(audio).decode("ascii")})
-    except Exception:
-        pass
+    if not is_fake_edge:
+        try:
+            if len(audio) > 64:  # persist real audio clips to DB cache for instant future playback
+                db.cache_put(db_key, lang, {"b64": base64.b64encode(audio).decode("ascii")})
+        except Exception:
+            pass
     return audio
