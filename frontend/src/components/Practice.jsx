@@ -2,8 +2,19 @@ import { useEffect, useRef, useState } from 'react'
 import { T } from '../lib/i18n'
 import { practiceCheck } from '../lib/api'
 import { Tex, Rich } from './Tex'
+import { LiveMathField } from './ProblemInput'
 
 const LEVELS = [['easy', '🟢', 15], ['medium', '🟡', 30], ['hard', '🔴', 50]]
+const MINI_KEYS = [
+  { face: '\\sqrt{x}', ins: '\\sqrt{}', title: 'sqrt' },
+  { face: '\\sqrt[n]{x}', ins: '\\sqrt[]{}', title: 'nth root' },
+  { face: 'x^2', ins: '^2', title: 'square' },
+  { face: 'x^n', ins: '^{}', title: 'power' },
+  { face: '\\frac{a}{b}', ins: '\\frac{}{}', title: 'fraction' },
+  { face: '\\pi', ins: '\\pi ', title: 'pi' },
+  { face: '\\pm', ins: '\\pm ', title: 'plus-minus' },
+  { face: '^\\circ', ins: '^\\circ ', title: 'degree' },
+]
 
 export default function Practice({ lang, practice = {}, dataKey, voiceOn, speak, onResult }) {
   const t = T[lang]
@@ -17,6 +28,7 @@ export default function Practice({ lang, practice = {}, dataKey, voiceOn, speak,
   const [msg, setMsg] = useState('')
   const [gain, setGain] = useState(0)
   const scored = useRef(new Set())
+  const mathRef = useRef()
   const list = practice[level] || []
   const i = list.length ? idx % list.length : 0
   const q = list[i]
@@ -38,6 +50,7 @@ export default function Practice({ lang, practice = {}, dataKey, voiceOn, speak,
     } catch (e) { setMsg(e.status === 0 ? t.net : e.status === 410 ? t.expired : e.status === 429 ? t.busy : t.err) }
     setBusy(false)
   }
+
   return (
     <section className="glass p-5 md:p-6">
       <h3 className="font-bold mb-3">{t.practice}</h3>
@@ -53,9 +66,30 @@ export default function Practice({ lang, practice = {}, dataKey, voiceOn, speak,
       {q ? (
         <div className="mt-4 space-y-3">
           <div className="text-xl overflow-x-auto no-scrollbar"><Tex tex={q.q} block /></div>
-          <div className="flex flex-wrap gap-2">
-            <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && check()} placeholder={t.answer} aria-label={t.answer}
-              className="flex-1 min-w-40 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 p-2" />
+
+          {/* Compact Visual Math Helper Toolbar */}
+          <div className="flex flex-wrap gap-1">
+            {MINI_KEYS.map((k) => (
+              <button key={k.title} type="button" title={k.title}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => mathRef.current?.insert ? mathRef.current.insert(k.ins) : setVal((v) => v + k.ins)}
+                className="h-8 min-w-8 rounded-lg border border-slate-200 bg-white/80 px-2 text-xs hover:border-indigo-400 hover:bg-indigo-50 dark:border-slate-700 dark:bg-slate-800">
+                <Tex tex={k.face} />
+              </button>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2">
+            <div className="flex-1 min-w-48">
+              <LiveMathField
+                editorRef={mathRef}
+                value={val}
+                onChange={setVal}
+                onSubmit={check}
+                placeholder={t.answer}
+                ariaLabel={t.answer}
+              />
+            </div>
             <button className="btn" onClick={check} disabled={busy || !dataKey}>{busy ? '…' : t.check}</button>
             <button className="btn-ghost" onClick={() => { setHint(true); if (voiceOn) speak(q.hint) }}>💡 {t.hint}</button>
           </div>

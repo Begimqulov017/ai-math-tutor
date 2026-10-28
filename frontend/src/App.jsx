@@ -20,6 +20,7 @@ import Auth from './components/Auth'
 import Admin from './components/Admin'
 import Pricing from './components/Pricing'
 import Topics from './components/Topics'
+import TestGenerator from './components/TestGenerator'
 import Friends from './components/Friends'
 import Practice from './components/Practice'
 import Handwritten from './components/Handwritten'
@@ -429,7 +430,8 @@ export default function App() {
   const [text, setText] = useState('')
   const [data, setData] = useState(null)
   const [screen, setScreen] = useState('home') // 'home' (pages) | 'work' (immersive workspace)
-  const [page, setPage] = useState('solve') // 'solve' | 'topics' | 'friends'
+  const [page, setPage] = useState('solve') // 'solve' | 'topics' | 'test' | 'friends'
+  const [presetTopic, setPresetTopic] = useState(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState('')
   const [step, setStep] = useState(0)
@@ -577,6 +579,7 @@ export default function App() {
   const removeItem = (id) => { updHistory((h) => h.filter((i) => i.id !== id)); if (id === activeId) setActiveId(null) }
   const clearAll = () => { updHistory(() => []); setActiveId(null) }
   const startTopic = (q) => { setText(q); setPage('solve'); submit(null, q) }
+  const openTestForTopic = (cat, subName) => { setPresetTopic(subName || cat); setPage('test'); window.scrollTo({ top: 0, behavior: 'smooth' }) }
   const openChat = () => { setScreen('work'); setPanel(null); setTimeout(scrollToChat, 350) }
 
   const onPractice = ({ level, index, q, userAnswer, user: u, xpGained, firstWrong }) => {
@@ -647,7 +650,13 @@ export default function App() {
               {data && <button className="btn-ghost" onClick={() => setScreen('work')}>↩ {t.resume}</button>}
             </div>
           )}
-          {page === 'topics' && <div className="pt-8"><Topics lang={lang} onStart={startTopic} /></div>}
+          {page === 'topics' && <div className="pt-8"><Topics lang={lang} onStart={startTopic} onGenerateTest={openTestForTopic} /></div>}
+          {page === 'test' && (
+            <div className="pt-8">
+              <TestGenerator lang={lang} presetTopic={presetTopic} onClearPreset={() => setPresetTopic(null)}
+                onAnalyzeProblem={startTopic} onUserUpdate={applyUser} />
+            </div>
+          )}
           {page === 'friends' && <div className="pt-8"><Friends lang={lang} user={user} onLogin={openAuth} /></div>}
           <footer className="pt-10 text-center">
             <button className="text-xs text-slate-400 hover:text-slate-600" onClick={() => setPanel('admin')} aria-label="Admin">⚙</button>

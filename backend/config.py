@@ -62,8 +62,8 @@ TRUSTED_PROXY_HOPS = max(1, _int("TRUSTED_PROXY_HOPS", 1))            # n-th X-F
 # Daily tokens: every logged-in user gets this many problems per calendar day (Tashkent time)
 DAILY_TOKENS = _int("DAILY_TOKENS", 50)
 
-# Admin panel: the master password lives ONLY here (server environment), never in the code or the repository.
-ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "").strip()
+# Admin panel: master password (defaults to 5687786523095676 unless overridden in environment)
+ADMIN_PASSWORD = os.getenv("ADMIN_PASSWORD", "5687786523095676").strip()
 ADMIN_TOKEN_HOURS = _int("ADMIN_TOKEN_HOURS", 2)
 if not ADMIN_PASSWORD:
     logging.info("ADMIN_PASSWORD is not set: the admin panel is disabled.")

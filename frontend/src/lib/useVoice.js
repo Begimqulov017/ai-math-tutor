@@ -92,6 +92,19 @@ function browserSpeak(text, lang) { // secondary fallback: the voices installed 
   } catch { /* nothing else to try */ }
 }
 
+/** Pre-fetches TTS audio in the background and stores it in `blobCache` so clicking Listen plays with zero lag. */
+export async function prefetchText(text, lang = "uz") {
+  const clean = String(text || "").trim()
+  if (!clean) return
+  const key = lang + "|v2|" + clean
+  if (blobCache.has(key)) return
+  try {
+    const blob = await ttsBlob(clean, lang)
+    if (blobCache.size >= 40) blobCache.delete(blobCache.keys().next().value)
+    blobCache.set(key, blob)
+  } catch { /* ignore prefetch errors */ }
+}
+
 /** Reads `text` (may contain $LaTeX$) aloud. Resolves as soon as playback has started (or the fallback took over). */
 export async function speakText(text, lang = 'uz') {
   const clean = String(text || '').trim()

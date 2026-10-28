@@ -80,7 +80,7 @@ _working_model: str | None = None
 
 def _gen_config(as_json: bool) -> dict:
     """Clean, universally compatible generationConfig for fast responses across all Gemini Flash versions."""
-    cfg: dict = {"temperature": 0.25}
+    cfg: dict = {"temperature": 0.2}
     if as_json:
         cfg["responseMimeType"] = "application/json"
     return cfg

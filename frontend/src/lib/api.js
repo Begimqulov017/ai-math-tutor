@@ -54,6 +54,7 @@ export const warmUp = () => fetch(API_URL + '/api/health').catch(() => {})
 
 export const analyzeProblem = (p) => call('POST', '/api/analyze-problem', p, 2, null, 25000)
 export const practiceCheck = (p) => call('POST', '/api/practice/check', p, 2)
+export const generateProblems = (p) => call('POST', '/api/generate-problems', p, 1, null, 35000)
 export const chatApi = (p) => call('POST', '/api/chat', p, 1) // guests: stateless chat
 export const checkSolution = (p) => call('POST', '/api/check-solution', p, 1, null, 25000)
 export const getGuestStatus = () => call('GET', '/api/guest-status', null, 2)

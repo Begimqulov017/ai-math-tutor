@@ -2,7 +2,7 @@ import { useEffect, useState } from 'react'
 import { AnimatePresence, motion } from 'framer-motion'
 import { T } from '../lib/i18n'
 import { Tex, Rich } from './Tex'
-import { unlockAudio } from '../lib/useVoice'
+import { prefetchText, unlockAudio } from '../lib/useVoice'
 
 // what is read aloud for one step: the formula, then the explanation (the server turns LaTeX into words)
 const stepSpeech = (s) => (s ? `$${s.latex}$. ${s.comment || ''}` : '')
@@ -21,7 +21,20 @@ export default function SolutionPlayer({ lang, steps = [], voiceOn, speak, onSte
   }
 
   useEffect(() => { setI(0); setAuto(false) }, [steps])
-  useEffect(() => { setOpen(false); onStep?.(i); if (voiceOn) speak(stepSpeech(steps[i])) }, [i]) // eslint-disable-line
+
+  // Background audio pre-fetching for step N and N+1 so clicking "🔊 Tinglash" plays immediately with zero lag
+  useEffect(() => {
+    setOpen(false)
+    onStep?.(i)
+    if (steps[i]) {
+      if (voiceOn) speak(stepSpeech(steps[i]))
+      else prefetchText(stepSpeech(steps[i]), lang)
+    }
+    if (steps[i + 1]) {
+      prefetchText(stepSpeech(steps[i + 1]), lang)
+    }
+  }, [i, steps, lang]) // eslint-disable-line
+
   useEffect(() => {
     if (!auto) return
     if (i >= last) { setAuto(false); return }

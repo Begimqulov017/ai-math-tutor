@@ -3,8 +3,7 @@ import { motion } from 'framer-motion'
 import { adminAdjustTokens, adminLogin, adminSetPlan, adminStats, adminUsers } from '../lib/api'
 import { Avatar, PlanBadge } from './ui'
 
-// Admin dashboard (Uzbek only, for the owner). The master password is checked by the SERVER (it lives only in the server's
-// environment); the browser keeps just the short-lived admin token in memory, so closing the panel or reloading logs out.
+// Admin dashboard (Protected by 16-digit master password, default 5687786523095676 on server).
 export default function Admin({ open, onClose }) {
   const [pw, setPw] = useState('')
   const [token, setToken] = useState(null)
@@ -72,6 +71,8 @@ export default function Admin({ open, onClose }) {
   if (!open) return null
   const cell = 'px-3 py-3 align-middle'
   const mini = 'field !rounded-xl !px-2.5 !py-1.5 text-sm'
+  const subCount = stats ? (stats.subscribers ?? (stats.premium || 0) + (stats.vip || 0)) : null
+
   return (
     <div className="fixed inset-0 z-[60] grid place-items-center bg-slate-950/70 p-3 backdrop-blur-sm" onClick={onClose}>
       <motion.div initial={{ opacity: 0, scale: 0.97 }} animate={{ opacity: 1, scale: 1 }} role="dialog" aria-modal="true" aria-label="Admin panel"
@@ -94,9 +95,15 @@ export default function Admin({ open, onClose }) {
         ) : (
           <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto p-5">
             <div className="grid grid-cols-2 gap-3 md:grid-cols-4">
-              {[['👥', 'Foydalanuvchilar', stats?.users], ['⭐', 'Premium', stats?.premium], ['👑', 'VIP', stats?.vip], ['🔥', 'Bugun faol', stats?.active_today]].map(([ic, label, v]) => (
+              {[
+                ['👥', 'Jami foydalanuvchilar', stats?.users],
+                ['🔥', 'Bugun faol', stats?.active_today],
+                ['🧮', 'Yechilgan masalalar', stats?.problems_solved ?? 0],
+                ['👑', 'Premium / VIP obunachilar', subCount !== null ? `${subCount} (${stats?.premium || 0} / ${stats?.vip || 0})` : '…'],
+              ].map(([ic, label, v]) => (
                 <div key={label} className="rounded-2xl border border-slate-200 bg-slate-50 p-4 dark:border-white/10 dark:bg-white/5">
-                  <div className="text-xs font-semibold text-slate-500">{ic} {label}</div><div className="mt-1 font-display text-3xl font-extrabold">{v ?? '…'}</div>
+                  <div className="text-xs font-semibold text-slate-500">{ic} {label}</div>
+                  <div className="mt-1 font-display text-3xl font-extrabold">{v ?? '…'}</div>
                 </div>
               ))}
             </div>

@@ -599,6 +599,19 @@ export default function ProblemInput({ lang, text, setText, onSubmit, loading })
     if (f) setImg({ name: f.name, mime: f.type, data: await fileToBase64(f) })
   }
 
+  const handlePaste = async (e) => {
+    const items = e.clipboardData?.items
+    if (!items) return
+    for (const item of items) {
+      if (item.type?.startsWith("image/")) {
+        e.preventDefault()
+        const f = item.getAsFile()
+        if (f) setImg({ name: f.name || "clipboard.png", mime: f.type || "image/png", data: await fileToBase64(f) })
+        return
+      }
+    }
+  }
+
   const insert = (snippet, back = 0) => {
     if (editorRef.current?.insert) {
       editorRef.current.insert(snippet, back)
@@ -624,7 +637,7 @@ export default function ProblemInput({ lang, text, setText, onSubmit, loading })
         </div>
       </div>
 
-      <div className="glass space-y-4 p-5 md:p-8">
+      <div className="glass space-y-4 p-5 md:p-8" onPaste={handlePaste}>
         <MathKeypad lang={lang} onInsert={insert} />
         <div className="flex flex-col gap-3 md:flex-row">
           <LiveMathField
@@ -637,7 +650,10 @@ export default function ProblemInput({ lang, text, setText, onSubmit, loading })
           />
           <div className="flex gap-2 md:w-48 md:flex-col">
             <button className="btn flex-1 !py-3 text-base" disabled={loading || (!text.trim() && !img)} onClick={go}>{loading ? t.analyzing : t.solve}</button>
-            <button className="btn-ghost" onClick={() => fileRef.current.click()}>📷 {img ? img.name.slice(0, 12) : t.upload}</button>
+            <div className="flex gap-1.5">
+              <button className="btn-ghost flex-1" onClick={() => fileRef.current.click()} title="Ctrl+V / Rasm yuklash">📷 {img ? img.name.slice(0, 12) : t.upload}</button>
+              {img && <button type="button" className="btn-ghost !px-2.5 text-rose-600" onClick={() => setImg(null)} aria-label="Remove image">✕</button>}
+            </div>
             <input ref={fileRef} type="file" accept="image/*" hidden onChange={pick} />
           </div>
         </div>

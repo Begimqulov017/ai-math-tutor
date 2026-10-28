@@ -5,7 +5,7 @@ import { levelInfo } from '../lib/store'
 import { stopSpeaking, unlockAudio } from '../lib/useVoice'
 import { Avatar, Logo, PlanBadge } from './ui'
 
-const TABS = [['solve', '🧮', 'navSolve'], ['topics', '📚', 'navTopics'], ['friends', '👥', 'navFriends']]
+const TABS = [['solve', '🧮', 'navSolve'], ['topics', '📚', 'navTopics'], ['test', '📝', 'navTest'], ['friends', '👥', 'navFriends']]
 
 /** Avatar button + dropdown: profile summary, shortcuts, Settings and Log out. */
 function ProfileMenu({ lang, user, onProgress, onHistory, onChat, onUpgrade, onSettings, onLogout }) {

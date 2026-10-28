@@ -7,12 +7,14 @@ import { Avatar, PlanBadge } from './ui'
 
 const MEDAL = ['🥇', '🥈', '🥉']
 
-/** "Do'stlar": add friends by username, leaderboard (XP / streak) among friends, milestones feed and sharing. */
+/** "Do'stlar": add friends by username, Friends & Global Top-10 XP Leaderboard, milestones feed and sharing. */
 export default function Friends({ lang, user, onLogin }) {
   const t = T[lang]
   const [ov, setOv] = useState({ friends: [], incoming: [], outgoing: [] })
   const [by, setBy] = useState('xp')
+  const [scope, setScope] = useState('friends') // 'friends' | 'global'
   const [rows, setRows] = useState([])
+  const [globalRows, setGlobalRows] = useState([])
   const [feed, setFeed] = useState([])
   const [name, setName] = useState('')
   const [msg, setMsg] = useState(null) // { ok, text }
@@ -21,7 +23,7 @@ export default function Friends({ lang, user, onLogin }) {
   const load = useCallback(async () => {
     try {
       const [o, l, f] = await Promise.all([getFriends(), getLeaderboard(by), getFeed()])
-      setOv(o); setRows(l.rows); setFeed(f.items)
+      setOv(o); setRows(l.rows || []); setGlobalRows(l.global_rows || l.rows || []); setFeed(f.items || [])
     } catch { /* the page simply stays empty */ }
   }, [by])
   useEffect(() => { if (user) load() }, [user?.id, by]) // eslint-disable-line
@@ -60,6 +62,9 @@ export default function Friends({ lang, user, onLogin }) {
   }
   const telegram = `https://t.me/share/url?url=${encodeURIComponent(window.location.origin)}&text=${encodeURIComponent(shareText)}`
   const label = (it) => (it.kind === 'streak' ? t.msStreak : it.kind === 'xp' ? t.msXp : t.msLevel).replace('{n}', it.value)
+  const activeBoard = scope === 'global' ? globalRows : rows
+  const lblGlobal = lang === 'ru' ? '🌍 Топ-10 недели' : lang === 'en' ? '🌍 Global Top-10' : '🌍 Haftalik Top-10'
+  const lblFriendsTab = lang === 'ru' ? '👥 Друзья' : lang === 'en' ? '👥 Friends' : '👥 Do‘stlar'
 
   return (
     <section className="space-y-6 pb-4" aria-label={t.frTitle}>
@@ -97,20 +102,28 @@ export default function Friends({ lang, user, onLogin }) {
             </div>
           )}
 
-          {/* leaderboard */}
+          {/* leaderboard (Friends + Global Top-10) */}
           <div className="glass p-5">
             <div className="mb-3 flex flex-wrap items-center gap-2">
               <h3 className="mr-auto font-display text-lg font-bold">🏆 {t.frBoard}</h3>
+              <div role="tablist" className="flex rounded-xl bg-slate-100 p-1 dark:bg-white/10">
+                {[['friends', lblFriendsTab], ['global', lblGlobal]].map(([k, l]) => (
+                  <button key={k} role="tab" aria-selected={scope === k} onClick={() => setScope(k)}
+                    className={`rounded-lg px-3 py-1.5 text-xs font-bold ${scope === k ? 'bg-indigo-600 text-white shadow' : 'text-slate-500'}`}>
+                    {l}
+                  </button>
+                ))}
+              </div>
               <div role="tablist" className="flex rounded-xl bg-slate-100 p-1 dark:bg-white/10">
                 {[['xp', t.frByXp], ['streak', t.frByStreak]].map(([k, l]) => (
                   <button key={k} role="tab" aria-selected={by === k} onClick={() => setBy(k)} className={`rounded-lg px-3 py-1.5 text-xs font-bold ${by === k ? 'bg-white shadow dark:bg-slate-800' : 'text-slate-500'}`}>{l}</button>
                 ))}
               </div>
             </div>
-            {rows.length <= 1 && <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{t.frEmpty}</p>}
+            {scope === 'friends' && rows.length <= 1 && <p className="mb-3 rounded-xl bg-amber-50 px-3 py-2 text-sm text-amber-800 dark:bg-amber-500/10 dark:text-amber-200">{t.frEmpty}</p>}
             <ol className="space-y-2">
-              {rows.map((r, i) => (
-                <motion.li key={r.id} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04 }}
+              {activeBoard.map((r, i) => (
+                <motion.li key={`${scope}-${r.id}`} initial={{ opacity: 0, x: -10 }} animate={{ opacity: 1, x: 0 }} transition={{ delay: i * 0.04 }}
                   className={`flex items-center gap-3 rounded-2xl px-3 py-2.5 ${r.me ? 'bg-indigo-50 ring-2 ring-indigo-300 dark:bg-indigo-500/10 dark:ring-indigo-500/40' : 'bg-white/60 dark:bg-white/5'}`}>
                   <span className="w-8 text-center text-xl font-bold" aria-label={`#${r.rank}`}>{MEDAL[r.rank - 1] || `#${r.rank}`}</span>
                   <Avatar name={r.name} />

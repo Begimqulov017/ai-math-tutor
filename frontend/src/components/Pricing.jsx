@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { motion } from 'framer-motion'
 import { T } from '../lib/i18n'
-import { PLANS, TELEGRAM, TELEGRAM_URL, fmtPrice } from '../lib/plans'
+import { PLANS, TELEGRAM, fmtPrice } from '../lib/plans'
 import { PlanBadge } from './ui'
 
 const THEME = {
@@ -10,7 +10,7 @@ const THEME = {
   vip: { ring: 'border-fuchsia-300 dark:border-fuchsia-500/40', head: 'from-fuchsia-500 to-rose-500' },
 }
 
-/** Pricing window: Free / Premium / VIP. Plans are activated by the admin on Telegram (manual payment). */
+/** Pricing window: Free / Premium / VIP. 1-click Telegram link with pre-filled email, name, username, and selected plan. */
 export default function Pricing({ lang, open, onClose, user }) {
   const t = T[lang]
   const [pick, setPick] = useState('premium')
@@ -19,7 +19,20 @@ export default function Pricing({ lang, open, onClose, user }) {
   const current = user?.plan || 'free'
   const names = { free: t.planFree, premium: t.planPremium, vip: t.planVip }
   const feats = { free: t.planFeatFree, premium: t.planFeatPremium, vip: t.planFeatVip }
-  const message = t.msgTpl.replace('{u}', user?.username || 'username').replace('{plan}', `${names[pick]} (${fmtPrice(PLANS[pick].price)} UZS)`)
+
+  const buildMsg = (planId) => {
+    const planLabel = `${names[planId]} (${fmtPrice(PLANS[planId].price)} UZS)`
+    const base = t.msgTpl.replace('{u}', user?.username || 'username').replace('{plan}', planLabel)
+    const details = [
+      user?.name ? `Ism: ${user.name}` : '',
+      user?.email ? `Email: ${user.email}` : '',
+    ].filter(Boolean).join(' | ')
+    return details ? `${base} (${details})` : base
+  }
+
+  const tgDirectLink = (planId) => `https://t.me/${TELEGRAM}?text=${encodeURIComponent(buildMsg(planId))}`
+  const message = buildMsg(pick)
+
   const copy = async () => {
     try { await navigator.clipboard.writeText(message); setCopied(true); setTimeout(() => setCopied(false), 2000) } catch { /* clipboard blocked: the text is visible anyway */ }
   }
@@ -50,7 +63,17 @@ export default function Pricing({ lang, open, onClose, user }) {
                 ? <div className="mt-5 rounded-2xl bg-emerald-50 px-4 py-2.5 text-center text-sm font-bold text-emerald-700 dark:bg-emerald-500/10 dark:text-emerald-300">{t.planCurrent}{id !== 'free' && until ? ` · ${t.planUntil.replace('{d}', until)}` : ''}</div>
                 : id === 'free'
                   ? <div className="mt-5 rounded-2xl bg-slate-100 px-4 py-2.5 text-center text-sm font-bold text-slate-500 dark:bg-white/5">{t.planFree}</div>
-                  : <button className={`mt-5 ${id === 'premium' ? 'btn-gold' : 'btn'} !py-2.5`} onClick={() => setPick(id)} aria-pressed={pick === id}>{pick === id ? '✓ ' : ''}{t.choosePlan} {names[id]}</button>}
+                  : (
+                    <a
+                      href={tgDirectLink(id)}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      onClick={() => setPick(id)}
+                      className={`mt-5 ${id === 'premium' ? 'btn-gold' : 'btn'} !py-2.5 text-center`}
+                    >
+                      ✈️ {t.choosePlan} {names[id]}
+                    </a>
+                  )}
             </motion.article>
           ))}
         </div>
@@ -63,10 +86,18 @@ export default function Pricing({ lang, open, onClose, user }) {
             </ol>
           </div>
           <div className="space-y-3">
-            <p className="text-sm font-semibold">{t.chooseWrite} <PlanBadge plan={pick} /> <b>{names[pick]}</b></p>
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-semibold">{t.chooseWrite}</span>
+              {['premium', 'vip'].map((p) => (
+                <button key={p} type="button" onClick={() => setPick(p)}
+                  className={`rounded-xl px-3 py-1 text-xs font-bold transition ${pick === p ? 'bg-indigo-600 text-white shadow' : 'bg-white/80 text-slate-600 dark:bg-slate-800 dark:text-slate-300'}`}>
+                  {names[p]}
+                </button>
+              ))}
+            </div>
             <p className="rounded-2xl border border-indigo-200 bg-white p-3 text-sm dark:border-white/10 dark:bg-slate-900" data-testid="pricing-message">{message}</p>
             <div className="flex flex-wrap gap-2">
-              <a className="btn" href={TELEGRAM_URL} target="_blank" rel="noopener noreferrer">✈️ {t.tgBtn} @{TELEGRAM}</a>
+              <a className="btn" href={tgDirectLink(pick)} target="_blank" rel="noopener noreferrer">✈️ {t.tgBtn} @{TELEGRAM}</a>
               <button className="btn-ghost" onClick={copy}>{copied ? t.copied : t.copyMsg}</button>
             </div>
           </div>

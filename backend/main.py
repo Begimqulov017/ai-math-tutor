@@ -80,6 +80,18 @@ class PracticeIn(BaseModel):
     lang: Lang = "uz"
 
 
+class TopicCountIn(BaseModel):
+    topic: str = Field(min_length=1, max_length=160)
+    count: int = Field(3, ge=1, le=20)
+
+
+class GenerateProblemsIn(BaseModel):
+    topics: list[TopicCountIn] = Field(min_length=1, max_length=15)
+    difficulty: Literal["easy", "medium", "hard", "mixed"] = "mixed"
+    format: Literal["open", "abcd"] = "abcd"
+    lang: Lang = "uz"
+
+
 class ChatIn(BaseModel):
     message: str = Field(max_length=1500)
     lang: Lang = "uz"
@@ -648,6 +660,105 @@ async def practice_check(b: PracticeIn, request: Request, uid: int | None = Depe
     return out
 
 
+def _fallback_generated_problems(topics: list[TopicCountIn], difficulty: str, fmt: str) -> list[dict]:
+    out = []
+    for item in topics:
+        for idx in range(1, item.count + 1):
+            a = idx + 1
+            b = idx + 3
+            s = a + b
+            p = a * b
+            lv = "easy" if difficulty == "mixed" and idx % 3 == 1 else "medium" if difficulty == "mixed" and idx % 3 == 2 else ("hard" if difficulty == "mixed" else difficulty)
+            q_latex = f"x^2 - {s}x + {p} = 0"
+            ans = f"{a}, {b}"
+            opts = [f"x_1={a},\\; x_2={b}", f"x_1={a+1},\\; x_2={b}", f"x_1=-{a},\\; x_2=-{b}", f"x_1={a},\\; x_2={b+2}"] if fmt == "abcd" else []
+            out.append({
+                "id": len(out) + 1,
+                "topic": item.topic,
+                "difficulty": lv,
+                "question_latex": q_latex,
+                "options": opts,
+                "answer": ans,
+                "short_solution": f"Viyet teoremasi bo'yicha $x_1 + x_2 = {s}$ va $x_1 \\cdot x_2 = {p}$, bundan $x_1 = {a},\\; x_2 = {b}$.",
+            })
+    return out
+
+
+@app.post("/api/generate-problems")
+async def generate_problems(b: GenerateProblemsIn, request: Request, user: dict | None = Depends(optional_user)):
+    rate_limit(request, "llm", 20)
+    total_count = sum(t.count for t in b.topics)
+    if total_count < 1 or total_count > 40:
+        raise HTTPException(400, "Total problem count must be between 1 and 40")
+    uid = user["id"] if user else None
+    plan = user["plan"] if user else "free"
+    cost = max(1, math.ceil(total_count / 10))
+    charged = False
+    if balancer.total and uid is not None:
+        ok, _left = db.charge_n_tokens(uid, cost)
+        if not ok:
+            raise HTTPException(403, {"code": "tokens_exhausted", "message": "Daily tokens exhausted. They are renewed at midnight (Tashkent time)."})
+        charged = True
+
+    if not balancer.total:
+        problems = _fallback_generated_problems(b.topics, b.difficulty, b.format)
+        return {"problems": problems, "total": len(problems), "tokens_used": 0, "user": db.get_user(uid) if uid else None}
+
+    topic_spec_str = ", ".join(f"{t.topic}: {t.count}" for t in b.topics)
+    fmt_rule = (
+        "Each item MUST have \"options\": an array of 4 distinct choices (LaTeX or text with $...$), and \"answer\" MUST match the exact correct option text (or its value)."
+        if b.format == "abcd"
+        else "Each item MUST have \"options\": [] (empty array) and \"answer\": a concise final answer (e.g. \"2, 3\" or \"12\")."
+    )
+    system = (
+        f"You are an expert math test generator. Write in {LANGS[b.lang]}. "
+        "Generate a high-quality, diverse set of math problems matching the requested topic counts and difficulty. "
+        "Return ONLY valid JSON (no markdown) with this exact structure:\n"
+        "{\"problems\": [{\"topic\": \"\", \"difficulty\": \"easy|medium|hard\", "
+        "\"question_latex\": \"LaTeX formula or word problem with formulas in $...$\", "
+        "\"options\": [\"\", \"\", \"\", \"\"], \"answer\": \"\", "
+        "\"short_solution\": \"1-2 concise steps with math in $...$\"}]}\n"
+        "Rules:\n"
+        "- Double every LaTeX backslash in JSON strings (e.g. \\frac, \\sqrt, \\sin).\n"
+        f"- Generate EXACTLY {total_count} problems distributed as: {topic_spec_str}.\n"
+        f"- Difficulty mode: {b.difficulty}. {fmt_rule}"
+    )
+    try:
+        async with lane(plan):
+            raw = await gemini([{"text": f"Generate {total_count} math problems: {topic_spec_str} (difficulty={b.difficulty}, format={b.format})"}], system, as_json=True, model=model_for(plan))
+        parsed = parse_json(raw)
+        items = parsed.get("problems") if isinstance(parsed, dict) else (parsed if isinstance(parsed, list) else [])
+        if not isinstance(items, list) or not items:
+            raise HTTPException(502, "AI returned an empty problem set")
+        cleaned = []
+        for idx, it in enumerate(items[:total_count], 1):
+            if not isinstance(it, dict):
+                continue
+            opts = [str(o) for o in (it.get("options") or [])[:4]] if b.format == "abcd" else []
+            cleaned.append({
+                "id": idx,
+                "topic": str(it.get("topic") or b.topics[0].topic),
+                "difficulty": str(it.get("difficulty") or ("medium" if b.difficulty == "mixed" else b.difficulty)),
+                "question_latex": str(it.get("question_latex") or it.get("question") or it.get("q") or ""),
+                "options": opts,
+                "answer": str(it.get("answer") or ""),
+                "short_solution": str(it.get("short_solution") or it.get("solution") or ""),
+            })
+        if not cleaned:
+            raise HTTPException(502, "AI returned invalid problem items")
+    except BaseException:
+        if uid is not None and charged:
+            db.refund_n_tokens(uid, cost)
+        raise
+
+    return {
+        "problems": cleaned,
+        "total": len(cleaned),
+        "tokens_used": cost if charged else 0,
+        "user": db.get_user(uid) if uid else None,
+    }
+
+
 @app.post("/api/chat")
 async def chat(body: ChatIn, request: Request):
     rate_limit(request, "llm", 20)
@@ -821,8 +932,8 @@ def friends_remove(fid: int, uid: int = Depends(required_user_id)):
 
 @app.get("/api/leaderboard")
 def leaderboard(by: Literal["xp", "streak"] = "xp", uid: int = Depends(required_user_id)):
-    """Ranking of me and my friends (no global list: nobody is shown to strangers)."""
-    return {"by": by, "rows": db.leaderboard(uid, by)}
+    """Ranking of me and my friends + Global Top-10 XP/streak leaderboard."""
+    return {"by": by, "rows": db.leaderboard(uid, by), "global_rows": db.global_leaderboard(uid, by, limit=10)}
 
 
 @app.get("/api/feed")

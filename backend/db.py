@@ -564,6 +564,29 @@ def refund_token(uid: int, key: str) -> None:
 
 
 @_retry
+def charge_n_tokens(uid: int, n: int = 1):
+    """Charge `n` tokens directly (e.g. 1 token per batch of up to 10 generated test problems). Returns (allowed, tokens_left)."""
+    n = max(1, int(n))
+    with conn() as c:
+        u = c.execute(select(users).where(users.c.id == uid).with_for_update()).mappings().first()
+        if not u:
+            return False, 0
+        u = _reset_if_new_day(c, dict(u))
+        left = _spend(u, n)
+        if left is None:
+            return False, 0
+        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=left[0], bonus_tokens=left[1]))
+        return True, sum(left)
+
+
+@_retry
+def refund_n_tokens(uid: int, n: int = 1) -> None:
+    n = max(1, int(n))
+    with conn() as c:
+        c.execute(update(users).where(users.c.id == uid).values(tokens_remaining=users.c.tokens_remaining + n))
+
+
+@_retry
 def charge_chat_message(uid: int):
     """Every CHAT_MESSAGES_PER_TOKEN-th chat message (counted over all threads) costs 1 token.
     Returns (allowed, charged)."""
@@ -625,7 +648,10 @@ def admin_stats() -> dict:
     with conn() as c:
         n = lambda *w: c.execute(select(func.count()).select_from(users).where(*w)).scalar() or 0  # noqa: E731
         live = lambda p: and_(users.c.plan == p, or_(users.c.plan_expires_at.is_(None), users.c.plan_expires_at > time.time()))  # noqa: E731
-        return {"users": n(), "premium": n(live("premium")), "vip": n(live("vip")), "active_today": n(users.c.last_day == _today())}
+        solved = c.execute(select(func.coalesce(func.sum(users.c.problems), 0))).scalar() or 0
+        prem = n(live("premium"))
+        vip = n(live("vip"))
+        return {"users": n(), "premium": prem, "vip": vip, "subscribers": prem + vip, "problems_solved": int(solved), "active_today": n(users.c.last_day == _today())}
 
 
 @_retry
@@ -961,6 +987,21 @@ def leaderboard(me: int, by: str = "xp") -> list:
     for i, r in enumerate(rows, 1):
         r["rank"], r["me"] = i, r["id"] == me
     return rows[:50]
+
+
+@_retry
+def global_leaderboard(me: int | None = None, by: str = "xp", limit: int = 10) -> list:
+    """Global Top-10 XP / Streak Leaderboard across all users."""
+    col = users.c.streak if by == "streak" else users.c.xp
+    with conn() as c:
+        rows = c.execute(select(users).order_by(col.desc(), users.c.xp.desc(), users.c.id.asc()).limit(limit)).mappings().all()
+        out = []
+        for i, r in enumerate(rows, 1):
+            card = _card(r)
+            card["rank"] = i
+            card["me"] = (me is not None and r["id"] == me)
+            out.append(card)
+        return out
 
 
 @_retry
