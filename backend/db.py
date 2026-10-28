@@ -813,6 +813,79 @@ def set_password(uid: int, pw_hash: str) -> None:
         c.execute(update(users).where(users.c.id == uid).values(pw_hash=pw_hash, tokens_valid_after=time.time()))
 
 
+@_retry
+def user_by_id_raw(uid: int):
+    """Full user row including pw_hash for password verification in settings."""
+    with conn() as c:
+        r = c.execute(select(users).where(users.c.id == uid)).mappings().first()
+        return dict(r) if r else None
+
+
+@_retry
+def update_profile(uid: int, *, name: str | None = None, username: str | None = None, email: str | None = None):
+    """Update user name, username, and/or email. Raises EmailTaken or UsernameTaken on conflict."""
+    vals = {}
+    if name is not None:
+        vals["name"] = name.strip()[:80]
+    if username is not None:
+        vals["username"] = username.strip().lower()
+    if email is not None:
+        vals["email"] = email.strip().lower()
+    if not vals:
+        return get_user(uid)
+    try:
+        with conn() as c:
+            if "email" in vals:
+                existing = c.execute(select(users.c.id).where(users.c.email == vals["email"], users.c.id != uid)).first()
+                if existing:
+                    raise EmailTaken
+            if "username" in vals:
+                existing = c.execute(select(users.c.id).where(users.c.username == vals["username"], users.c.id != uid)).first()
+                if existing:
+                    raise UsernameTaken
+            c.execute(update(users).where(users.c.id == uid).values(**vals))
+    except IntegrityError:
+        if "email" in vals:
+            ex = user_by_email(vals["email"])
+            if ex and ex["id"] != uid:
+                raise EmailTaken from None
+        if "username" in vals:
+            ex = user_by_username(vals["username"])
+            if ex and ex["id"] != uid:
+                raise UsernameTaken from None
+        raise
+    return get_user(uid)
+
+
+@_retry
+def delete_all_threads(uid: int) -> None:
+    with conn() as c:
+        tids = [r[0] for r in c.execute(select(chat_threads.c.id).where(chat_threads.c.user_id == uid)).all()]
+        if tids:
+            c.execute(delete(chat_messages).where(chat_messages.c.thread_id.in_(tids)))
+            c.execute(delete(chat_threads).where(chat_threads.c.user_id == uid))
+
+
+@_retry
+def delete_user_account(uid: int) -> bool:
+    with conn() as c:
+        u = c.execute(select(users.c.email).where(users.c.id == uid)).first()
+        if not u:
+            return False
+        email = u[0]
+        tids = [r[0] for r in c.execute(select(chat_threads.c.id).where(chat_threads.c.user_id == uid)).all()]
+        if tids:
+            c.execute(delete(chat_messages).where(chat_messages.c.thread_id.in_(tids)))
+            c.execute(delete(chat_threads).where(chat_threads.c.user_id == uid))
+        c.execute(delete(awards).where(awards.c.user_id == uid))
+        c.execute(delete(milestones).where(milestones.c.user_id == uid))
+        c.execute(delete(friendships).where(or_(friendships.c.user_id == uid, friendships.c.friend_id == uid)))
+        c.execute(delete(email_verifications).where(email_verifications.c.email == email))
+        c.execute(delete(password_resets).where(password_resets.c.email == email))
+        c.execute(delete(users).where(users.c.id == uid))
+        return True
+
+
 # ---------------- friends / leaderboard / milestones ----------------
 def _card(u) -> dict:
     return {"id": u["id"], "username": u["username"], "name": u["name"], "xp": u["xp"], "streak": u["streak"],

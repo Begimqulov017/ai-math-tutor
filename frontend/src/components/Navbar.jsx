@@ -7,8 +7,8 @@ import { Avatar, Logo, PlanBadge } from './ui'
 
 const TABS = [['solve', '🧮', 'navSolve'], ['topics', '📚', 'navTopics'], ['friends', '👥', 'navFriends']]
 
-/** Avatar button + dropdown: profile summary, shortcuts and a clearly visible Log out. */
-function ProfileMenu({ lang, user, onProgress, onHistory, onChat, onUpgrade, onLogout }) {
+/** Avatar button + dropdown: profile summary, shortcuts, Settings and Log out. */
+function ProfileMenu({ lang, user, onProgress, onHistory, onChat, onUpgrade, onSettings, onLogout }) {
   const t = T[lang]
   const [open, setOpen] = useState(false)
   const ref = useRef(null)
@@ -23,7 +23,7 @@ function ProfileMenu({ lang, user, onProgress, onHistory, onChat, onUpgrade, onL
     return () => { document.removeEventListener('mousedown', down); document.removeEventListener('keydown', key) }
   }, [open])
 
-  const go = (fn) => () => { setOpen(false); fn() }
+  const go = (fn) => () => { setOpen(false); fn?.() }
   const item = 'flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm font-semibold transition hover:bg-indigo-50 dark:hover:bg-white/10'
   return (
     <div className="relative" ref={ref}>
@@ -52,6 +52,7 @@ function ProfileMenu({ lang, user, onProgress, onHistory, onChat, onUpgrade, onL
               <div className="mb-1 flex justify-between text-xs font-semibold"><span>Lv {L.level}</span><span>⭐ {user.xp} / {L.next}</span></div>
               <div className="h-1.5 overflow-hidden rounded bg-slate-200 dark:bg-slate-700"><div className="h-full bg-gradient-to-r from-amber-400 to-orange-500" style={{ width: `${L.pct}%` }} /></div>
             </div>
+            <button role="menuitem" className={item} onClick={go(onSettings)}>⚙️ {t.settings}</button>
             <button role="menuitem" className={item} onClick={go(onProgress)}>📊 {t.prog}</button>
             <button role="menuitem" className={item} onClick={go(onHistory)}>🕘 {t.hist}</button>
             <button role="menuitem" className={item} onClick={go(onChat)}>💬 {t.chatTitle}</button>
@@ -65,7 +66,7 @@ function ProfileMenu({ lang, user, onProgress, onHistory, onChat, onUpgrade, onL
   )
 }
 
-export default function Navbar({ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, onMic, page, setPage, user, onLogin, onHistory, onProgress, onChat, onUpgrade, onLogout }) {
+export default function Navbar({ lang, setLang, dark, setDark, voiceOn, setVoiceOn, micActive, onMic, page, setPage, user, onLogin, onHistory, onProgress, onChat, onUpgrade, onSettings, onLogout }) {
   const t = T[lang]
   const tk = user ? user.tokens_remaining : 0
   const icon = 'btn-ghost !px-2.5 !py-2'
@@ -105,7 +106,7 @@ export default function Navbar({ lang, setLang, dark, setDark, voiceOn, setVoice
                 title={t.tokensLbl} aria-label={`${t.tokensLbl}: ${tk} / ${user.daily_tokens}`}>
                 ⚡ {t.tokensLbl}: {tk > user.daily_tokens ? tk : `${tk}/${user.daily_tokens}`}
               </span>
-              <ProfileMenu {...{ lang, user, onProgress, onHistory, onChat, onUpgrade, onLogout }} />
+              <ProfileMenu {...{ lang, user, onProgress, onHistory, onChat, onUpgrade, onSettings, onLogout }} />
             </>
           ) : (
             <>

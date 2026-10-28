@@ -65,6 +65,13 @@ export const getMe = () => call('GET', '/api/me', null, 1)
 export const getSync = () => call('GET', '/api/sync', null, 1)
 export const putSync = (d) => call('PUT', '/api/sync', d, 1)
 
+// user profile & settings
+export const updateProfile = (p) => call('PUT', '/api/me/profile', p)
+export const updateEmail = (p) => call('PUT', '/api/me/email', p)
+export const updatePassword = (p) => call('PUT', '/api/me/password', p)
+export const clearMyThreads = () => call('DELETE', '/api/me/threads')
+export const deleteMyAccount = (password) => call('DELETE', '/api/me', { password })
+
 // persistent chat threads (logged-in users)
 export const listThreads = () => call('GET', '/api/chat/threads', null, 1)
 export const createThread = (p) => call('POST', '/api/chat/threads', p, 1)

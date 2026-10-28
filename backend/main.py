@@ -170,6 +170,26 @@ class LoginIn(BaseModel):
     password: str = Field(max_length=128)
 
 
+class ProfileUpdateIn(BaseModel):
+    name: str | None = Field(None, min_length=1, max_length=40)
+    username: str | None = Field(None, max_length=30)
+
+
+class EmailUpdateIn(BaseModel):
+    email: str = Field(max_length=120)
+    password: str = Field(min_length=1, max_length=128)
+
+
+class PasswordChangeIn(BaseModel):
+    current_password: str = Field(min_length=1, max_length=128)
+    new_password: str = Field(min_length=6, max_length=128)
+    password_confirm: str | None = Field(None, max_length=128)
+
+
+class AccountDeleteIn(BaseModel):
+    password: str = Field(min_length=1, max_length=128)
+
+
 # ---------------- helpers ----------------
 def _clean_graph(g):
     """A function graph the browser can draw safely (the expression is whitelisted again in the browser)."""
@@ -458,6 +478,68 @@ async def login(b: LoginIn, request: Request):
 @app.get("/api/me")
 def me(uid: int = Depends(required_user_id)):
     return {"user": db.get_user(uid)}
+
+
+@app.put("/api/me/profile")
+def update_my_profile(b: ProfileUpdateIn, request: Request, uid: int = Depends(required_user_id)):
+    rate_limit(request, "profile", 20)
+    name = b.name.strip() if b.name is not None else None
+    username = None
+    if b.username is not None:
+        username = b.username.strip().lower().lstrip("@")
+        if not db.valid_username(username):
+            raise HTTPException(400, {"code": "bad_username", "message": "Username: 3-20 letters, digits or _"})
+    try:
+        user = db.update_profile(uid, name=name, username=username)
+    except db.UsernameTaken:
+        raise HTTPException(409, {"code": "username_taken", "message": "This username is taken"})
+    except db.EmailTaken:
+        raise HTTPException(409, {"code": "email_taken", "message": "This email is already registered"})
+    return {"user": user}
+
+
+@app.put("/api/me/email")
+async def update_my_email(b: EmailUpdateIn, request: Request, uid: int = Depends(required_user_id)):
+    rate_limit(request, "profile", 10)
+    email = b.email.strip().lower()
+    if not EMAIL_RE.fullmatch(email):
+        raise HTTPException(400, "Invalid email")
+    row = db.user_by_id_raw(uid)
+    if not row or not await asyncio.to_thread(verify_password, b.password, row["pw_hash"]):
+        raise HTTPException(401, {"code": "wrong_password", "message": "Wrong current password"})
+    try:
+        user = db.update_profile(uid, email=email)
+    except db.EmailTaken:
+        raise HTTPException(409, {"code": "email_taken", "message": "This email is already registered"})
+    return {"user": user}
+
+
+@app.put("/api/me/password")
+async def update_my_password(b: PasswordChangeIn, request: Request, uid: int = Depends(required_user_id)):
+    rate_limit(request, "auth", 10)
+    _same_password(b.new_password, b.password_confirm)
+    row = db.user_by_id_raw(uid)
+    if not row or not await asyncio.to_thread(verify_password, b.current_password, row["pw_hash"]):
+        raise HTTPException(401, {"code": "wrong_password", "message": "Wrong current password"})
+    pw_hash = await asyncio.to_thread(hash_password, b.new_password)
+    db.set_password(uid, pw_hash)
+    return {"token": make_token(uid), "user": db.get_user(uid)}
+
+
+@app.delete("/api/me/threads")
+def clear_my_threads(uid: int = Depends(required_user_id)):
+    db.delete_all_threads(uid)
+    return {"ok": True}
+
+
+@app.delete("/api/me")
+async def delete_my_account(b: AccountDeleteIn, request: Request, uid: int = Depends(required_user_id)):
+    rate_limit(request, "auth", 5)
+    row = db.user_by_id_raw(uid)
+    if not row or not await asyncio.to_thread(verify_password, b.password, row["pw_hash"]):
+        raise HTTPException(401, {"code": "wrong_password", "message": "Wrong current password"})
+    db.delete_user_account(uid)
+    return {"ok": True}
 
 
 @app.get("/api/sync")
