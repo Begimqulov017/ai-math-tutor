@@ -6,14 +6,20 @@ const macros = { '\\hl': '\\textcolor{##F59E0B}{#1}' }
 // Explicit LaTeX commands or environments should NEVER be classified as plain prose
 const HAS_LATEX_CMD = /\\(begin|end|frac|dfrac|tfrac|sqrt|sin|cos|tan|cot|tg|ctg|log|ln|det|int|sum|prod|lim|pi|infty|theta|alpha|beta|gamma|delta|pm|mp|cdot|times|div|le|leq|ge|geq|ne|neq|approx|angle|triangle|circ|hl|textcolor|left|right|pmatrix|bmatrix|vmatrix|matrix|cases)\b|\^\{|_\{|[A-Za-z0-9]\^[0-9a-zA-Z]|[A-Za-z]_[0-9a-zA-Z]/
 
-// several plain words (e.g. a word problem) = prose, not a formula
+// Even a single plain word (4+ letters like "Salom", "kvadrat") without LaTeX commands is conversational prose, not math
 const isProse = (s) => {
   if (HAS_LATEX_CMD.test(s)) return false
   const bare = s
     .replace(/\\text\{[^}]*\}/g, '')
     .replace(/\\(begin|end)\{[^}]*\}/g, '')
     .replace(/\\[a-zA-Z]+/g, '')
-  return (bare.match(/(?<![\\A-Za-z])[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ‘’]{3,}/g) || []).length >= 3
+  const words4 = bare.match(/(?<![\\A-Za-z])[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ‘’]{4,}/g) || []
+  const words3 = bare.match(/(?<![\\A-Za-z])[A-Za-zА-Яа-яЁёЎўҚқҒғҲҳ'ʻ‘’]{3,}/g) || []
+  // If there is no math operator (=, +, -, ^, _, \) and at least 1 word of 3+ letters (e.g., "Salom"), treat as prose
+  if (!/[=+\-*/^_\\<>]/.test(bare) && words3.length >= 1) return true
+  // If there is at least 1 word of 4+ letters alongside text (e.g. "x+1=2 tenglamasini yeching"), treat as prose
+  if (words4.length >= 1) return true
+  return words3.length >= 2
 }
 
 // Convert mixed text + bare LaTeX into segments so formulas inside sentences still render visually
@@ -24,7 +30,6 @@ export function Tex({ tex = '', block = false, className = '' }) {
   if (!str) return null
   if (str.includes('$')) return <Rich text={str} className={className} />
   if (isProse(str)) {
-    // Even in prose, if there are inline math tokens without $, render them nicely
     if (HAS_LATEX_CMD.test(str)) return <Rich text={str} className={className} />
     return <span className={className}>{str}</span>
   }
@@ -48,7 +53,6 @@ export function Tex({ tex = '', block = false, className = '' }) {
 function renderBareSegment(seg, keyPrefix) {
   if (!seg) return null
   if (!HAS_LATEX_CMD.test(seg)) return <span key={keyPrefix}>{seg}</span>
-  // If the entire segment looks like a formula, render directly with Tex
   if (!isProse(seg)) return <Tex key={keyPrefix} tex={seg} />
   const out = []
   let last = 0
@@ -67,12 +71,10 @@ function renderBareSegment(seg, keyPrefix) {
 export function Rich({ text = '', className = '' }) {
   const raw = String(text ?? '')
   if (!raw) return null
-  // Normalize \[ ... \] to $$...$$ and \( ... \) to $...$
   const norm = raw
     .replace(/\\\[([\s\S]+?)\\\]/g, (_, m) => `$$${m}$$`)
     .replace(/\\\(([\s\S]+?)\\\)/g, (_, m) => `$${m}$`)
 
-  // Split by $$...$$ first, then $...$
   const blocks = norm.split(/\$\$([\s\S]+?)\$\$/g)
   return (
     <span className={className}>

@@ -16,7 +16,8 @@ log = logging.getLogger("mathtutor.llm")
 
 
 def _url(model: str) -> str:
-    return f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+    m = model.strip().removeprefix("models/")
+    return f"https://generativelanguage.googleapis.com/v1beta/models/{m}:generateContent"
 
 
 # "Priority AI responses": every plan has its own lane of simultaneous AI calls. When the service is busy, free users
@@ -73,35 +74,45 @@ class APIKeyBalancer:
 
 balancer = APIKeyBalancer()
 
+# Remember which model last succeeded so subsequent calls hit the working model immediately
+_working_model: str | None = None
 
-def _gen_config(as_json: bool, model: str) -> dict:
-    """Low-latency generationConfig: disable thinking overhead on 2.5 Flash so responses return in 1-2s."""
-    cfg: dict = {
-        "temperature": 0.2,
-        "maxOutputTokens": 2048 if as_json else 600,
-    }
+
+def _gen_config(as_json: bool) -> dict:
+    """Clean, universally compatible generationConfig for fast responses across all Gemini Flash versions."""
+    cfg: dict = {"temperature": 0.25}
     if as_json:
         cfg["responseMimeType"] = "application/json"
-    if "2.5" in (model or ""):
-        cfg["thinkingConfig"] = {"thinkingBudget": 0}
     return cfg
 
 
+def _candidate_models(preferred: str | None) -> list[str]:
+    out = []
+    if _working_model and (not preferred or preferred == config.MODEL):
+        out.append(_working_model)
+    if preferred:
+        out.append(preferred)
+    for m in getattr(config, "FALLBACK_MODELS", ["gemini-2.5-flash", "gemini-3-flash-preview", "gemini-2.0-flash"]):
+        if m not in out:
+            out.append(m)
+    return out
+
+
 async def gemini(parts: list, system: str, as_json: bool, history: list | None = None, model: str | None = None) -> str:
+    global _working_model
     if not balancer.total:
         raise HTTPException(503, "AI service is not configured")
-    primary_model = model or config.MODEL
-    models_to_try = [primary_model]
-    if getattr(config, "FALLBACK_MODEL", "") and config.FALLBACK_MODEL not in models_to_try:
-        models_to_try.append(config.FALLBACK_MODEL)
 
-    async with httpx.AsyncClient(timeout=30) as client:
+    models_to_try = _candidate_models(model or config.MODEL)
+    body = {
+        "systemInstruction": {"parts": [{"text": system}]},
+        "contents": [*(history or []), {"role": "user", "parts": parts}],
+        "generationConfig": _gen_config(as_json),
+    }
+
+    last_status = 503
+    async with httpx.AsyncClient(timeout=45) as client:
         for cur_model in models_to_try:
-            body = {
-                "systemInstruction": {"parts": [{"text": system}]},
-                "contents": [*(history or []), {"role": "user", "parts": parts}],
-                "generationConfig": _gen_config(as_json, cur_model),
-            }
             url = _url(cur_model)
             for key in balancer.order():
                 tag = "..." + key[-4:]
@@ -111,22 +122,28 @@ async def gemini(parts: list, system: str, as_json: bool, history: list | None =
                     log.warning("key %s network error %s", tag, e.__class__.__name__)
                     balancer.rest(key, 10)
                     continue
+                last_status = r.status_code
                 if r.status_code == 200:
                     try:
                         out = r.json()["candidates"][0]["content"]["parts"]
                     except (KeyError, IndexError, ValueError):
                         log.warning("key %s empty reply: %s", tag, r.text[:150])
                         continue
+                    _working_model = cur_model
                     return "".join(p.get("text", "") for p in out if not p.get("thought"))
-                # If the model doesn't exist or doesn't support thinkingConfig, fall back to next model
-                if r.status_code in (400, 404) and cur_model != models_to_try[-1]:
-                    log.warning("model %s returned %s, falling back to %s", cur_model, r.status_code, models_to_try[-1])
+                # If this model name returned 404 (not found/deprecated) or 400, immediately try the next candidate model
+                if r.status_code in (400, 404):
+                    log.warning("model %s returned %s (%s), trying next fallback model", cur_model, r.status_code, r.text[:120])
+                    if _working_model == cur_model:
+                        _working_model = None
                     break
-                log.warning("key %s failed: %s %s", tag, r.status_code, r.text[:200])
+                log.warning("key %s failed on %s: %s %s", tag, cur_model, r.status_code, r.text[:200])
                 if r.status_code in COOLDOWN:
                     balancer.rest(key, COOLDOWN[r.status_code])
                     continue
                 raise HTTPException(502, f"AI request was rejected ({r.status_code})")
+    if last_status in (400, 404):
+        raise HTTPException(502, f"AI request was rejected ({last_status})")
     raise HTTPException(503, "AI is busy right now, please try again in a moment")
 
 

@@ -88,7 +88,13 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
         if (voiceOn) speak(r.reply.content)
       } catch (e) {
         setMsgs((m) => m.filter((x) => x.id !== mine.id)); setVal(content)
-        setErr(e.status === 0 ? t.net : e.code === 'tokens_exhausted' ? t.tokensOut : e.status === 429 || e.status === 503 ? t.busy : t.err)
+        if (e.code === 'tokens_exhausted' && user) onUser?.({ ...user, tokens_remaining: 0 })
+        setErr(
+          e.status === 0 ? t.net
+            : e.code === 'tokens_exhausted' ? t.tokensOut
+            : e.status === 429 || e.status === 503 ? t.busy
+            : t.err + (e.message ? ': ' + String(e.message).slice(0, 160) : '')
+        )
       }
     } else {
       setGuestMsgs((m) => [...m, mine])
@@ -98,7 +104,11 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
         if (voiceOn) speak(r.reply)
       } catch (e) {
         setGuestMsgs((m) => m.filter((x) => x.id !== mine.id)); setVal(content)
-        setErr(e.status === 0 ? t.net : e.status === 429 || e.status === 503 ? t.busy : t.err)
+        setErr(
+          e.status === 0 ? t.net
+            : e.status === 429 || e.status === 503 ? t.busy
+            : t.err + (e.message ? ': ' + String(e.message).slice(0, 160) : '')
+        )
       }
     }
     setBusy(false)

@@ -18,9 +18,19 @@ def _int(name: str, default: int) -> int:
         return default
 
 
-# Fastest low-latency Gemini Flash model (gemini-2.5-flash or gemini-2.0-flash)
-MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip() or "gemini-2.5-flash"
-FALLBACK_MODEL = os.getenv("GEMINI_FALLBACK_MODEL", "gemini-2.0-flash").strip() or "gemini-2.0-flash"
+# Normalize legacy/invalid model names from server env vars so 404 never happens
+_RAW_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+if not _RAW_MODEL or _RAW_MODEL in ("gemini-1.5-flash", "gemini-1.5-pro", "gemini-pro"):
+    MODEL = "gemini-2.5-flash"
+else:
+    MODEL = _RAW_MODEL
+
+FALLBACK_MODELS = [
+    "gemini-2.5-flash",
+    "gemini-3-flash-preview",
+    "gemini-2.0-flash",
+    "gemini-2.5-flash-lite",
+]
 
 # Optional OpenAI API key for ultra-natural TTS (tts-1 with nova / alloy voice)
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
