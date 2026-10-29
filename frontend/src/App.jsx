@@ -580,6 +580,14 @@ export default function App() {
   const clearAll = () => { updHistory(() => []); setActiveId(null) }
   const startTopic = (q) => { setText(q); setPage('solve'); submit(null, q) }
   const openTestForTopic = (cat, subName) => { setPresetTopic(subName || cat); setPage('test'); window.scrollTo({ top: 0, behavior: 'smooth' }) }
+  const handleTrainMistakes = (topics) => {
+    const topicStr = Array.isArray(topics) ? topics.join(', ') : (topics || '')
+    setPresetTopic(topicStr || 'Aralash mashqlar')
+    setPage('test')
+    setScreen('home')
+    setPanel(null)
+    window.scrollTo({ top: 0, behavior: 'smooth' })
+  }
   const openChat = () => { setScreen('work'); setPanel(null); setTimeout(scrollToChat, 350) }
 
   const onPractice = ({ level, index, q, userAnswer, user: u, xpGained, firstWrong }) => {
@@ -607,7 +615,7 @@ export default function App() {
       <History lang={lang} open={panel === 'history'} onClose={closePanel} items={history} activeId={activeId}
         onOpen={openItem} onDelete={removeItem} onClear={clearAll} onNew={newProblem} />
       <Progress lang={lang} open={panel === 'progress'} onClose={closePanel} user={user} mistakes={mistakes}
-        onFixed={fixMistake} onDelete={deleteMistake} onLogin={openAuth} />
+        onFixed={fixMistake} onDelete={deleteMistake} onLogin={openAuth} onTrainMistakes={handleTrainMistakes} />
       <Auth lang={lang} open={panel === 'auth'} mode={authMode} onClose={closePanel} onSubmit={handleAuth} onVerify={handleVerify} onResend={handleResend}
         onForgot={handleForgot} onReset={handleReset} onCheckUsername={checkUsername} user={user} onLogout={logout} />
       <Pricing lang={lang} open={panel === 'pricing'} onClose={closePanel} user={user} />

@@ -47,7 +47,7 @@ body::before {
          shadow-lg shadow-amber-500/30 transition duration-200 hover:-translate-y-0.5 active:translate-y-0
          focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-400;
 }
-.field {
+.field, .input {
   @apply w-full rounded-2xl border border-slate-200 dark:border-white/10 bg-white/90 dark:bg-slate-900/70 px-4 py-3 outline-none transition
          focus:border-indigo-400 focus:ring-4 focus:ring-indigo-400/20 placeholder:text-slate-400;
 }

@@ -3,6 +3,7 @@ import { motion } from 'framer-motion'
 import { T } from '../lib/i18n'
 import { CURRICULUM } from '../lib/curriculum'
 import { generateProblems } from '../lib/api'
+import { clearActiveTest, loadActiveTest, saveActiveTest } from '../lib/store'
 import { Tex, Rich } from './Tex'
 
 const LBL = {
@@ -140,12 +141,20 @@ export default function TestGenerator({ lang, presetTopic, onClearPreset, onAnal
   const [format, setFormat] = useState('abcd') // abcd | open
   const [loading, setLoading] = useState(false)
   const [err, setErr] = useState('')
-  const [problems, setProblems] = useState([])
-  const [answers, setAnswers] = useState({})
-  const [checked, setChecked] = useState({})
-  const [openSol, setOpenSol] = useState({})
-  const [finished, setFinished] = useState(false)
+  const savedTest = loadActiveTest()
+  const [problems, setProblems] = useState(() => savedTest?.problems || [])
+  const [answers, setAnswers] = useState(() => savedTest?.answers || {})
+  const [checked, setChecked] = useState(() => savedTest?.checked || {})
+  const [openSol, setOpenSol] = useState(() => savedTest?.openSol || {})
+  const [finished, setFinished] = useState(() => savedTest?.finished || false)
   const [printWithSol, setPrintWithSol] = useState(true)
+
+  // Persist active test state automatically on any update
+  useEffect(() => {
+    if (problems.length > 0) {
+      saveActiveTest({ problems, answers, checked, openSol, finished, selected, difficulty, format })
+    }
+  }, [problems, answers, checked, openSol, finished, selected, difficulty, format])
 
   useEffect(() => {
     if (presetTopic) {
@@ -360,7 +369,7 @@ export default function TestGenerator({ lang, presetTopic, onClearPreset, onAnal
           <div className="print:hidden glass flex flex-wrap items-center justify-between gap-3 p-4">
             <div className="flex flex-wrap items-center gap-2">
               <button type="button" className="btn text-sm" onClick={finishAll}>{l.finishBtn}</button>
-              <button type="button" className="btn-ghost text-sm" onClick={handleGenerate} disabled={loading}>{l.resetBtn}</button>
+              <button type="button" className="btn-ghost text-sm" onClick={() => { clearActiveTest(); setProblems([]); setAnswers({}); setChecked({}); setOpenSol({}); setFinished(false) }}>{l.resetBtn}</button>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <label className="flex items-center gap-2 text-xs font-semibold text-slate-600 dark:text-slate-300 cursor-pointer">

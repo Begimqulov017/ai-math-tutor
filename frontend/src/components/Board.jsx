@@ -1,4 +1,4 @@
-import React, { useState } from 'react'
+import React, { useMemo, useRef, useState } from 'react'
 import { T } from '../lib/i18n'
 import { Tex } from './Tex'
 
@@ -94,7 +94,7 @@ function Diagram({ spec, focus = [] }) {
   )
 }
 
-// ---- function graphs (Premium / VIP): expressions are whitelisted before being compiled ----
+// ---- function graphs: expressions are whitelisted before being compiled ----
 function compile(expr) {
   let src = String(expr).toLowerCase().replace(/\s+/g, '').replace(/×/g, '*').replace(/·/g, '*')
   src = src.replace(/(\d)(x|\()/g, '$1*$2').replace(/(x|\))(\d|\(|x)/g, '$1*$2').replace(/\^/g, '**')
@@ -106,50 +106,199 @@ function compile(expr) {
 }
 const COLORS = ['#38bdf8', '#a78bfa', '#34d399']
 
+function findKeyPoints(fn, x0, x1) {
+  const points = []
+  const N = 400
+  const dx = (x1 - x0) / N
+  let prevX = x0
+  let prevY = fn(x0)
+  let prevDeriv = null
+
+  // Y-intercept at x = 0 (if 0 is inside bounds)
+  if (x0 <= 0 && x1 >= 0) {
+    const yAt0 = fn(0)
+    if (Number.isFinite(yAt0)) {
+      points.push({ x: 0, y: Number(yAt0.toFixed(2)), label: `Y-kesish (0, ${yAt0.toFixed(1)})`, kind: 'y-intercept' })
+    }
+  }
+
+  for (let i = 1; i <= N; i++) {
+    const curX = x0 + i * dx
+    const curY = fn(curX)
+    if (!Number.isFinite(curY) || !Number.isFinite(prevY)) {
+      prevX = curX; prevY = curY; prevDeriv = null; continue
+    }
+
+    // Root detection (sign change of y)
+    if ((prevY <= 0 && curY >= 0) || (prevY >= 0 && curY <= 0)) {
+      // Linear interpolation root approximation
+      const t = Math.abs(prevY) / (Math.abs(prevY) + Math.abs(curY) || 1)
+      const rootX = prevX + t * dx
+      if (Math.abs(rootX) > 0.05) { // don't duplicate x=0
+        points.push({ x: Number(rootX.toFixed(2)), y: 0, label: `Ildiz (${rootX.toFixed(2)}, 0)`, kind: 'root' })
+      }
+    }
+
+    // Extrema detection (sign change of derivative)
+    const curDeriv = (curY - prevY) / dx
+    if (prevDeriv !== null && ((prevDeriv > 0 && curDeriv < 0) || (prevDeriv < 0 && curDeriv > 0))) {
+      const isMax = prevDeriv > 0
+      points.push({
+        x: Number(curX.toFixed(2)),
+        y: Number(curY.toFixed(2)),
+        label: `${isMax ? 'Maksimum' : 'Minimum'} (${curX.toFixed(1)}, ${curY.toFixed(1)})`,
+        kind: isMax ? 'max' : 'min',
+      })
+    }
+    prevDeriv = curDeriv
+    prevX = curX
+    prevY = curY
+  }
+  return points.slice(0, 7) // keep most informative points
+}
+
 function Graph({ spec }) {
-  const fns = (spec.functions || []).map((f) => ({ ...f, fn: compile(f.expr) })).filter((f) => f.fn)
+  const fns = useMemo(() => (spec.functions || []).map((f) => ({ ...f, fn: compile(f.expr) })).filter((f) => f.fn), [spec])
+  const baseRange = useMemo(() => {
+    const x0 = Number(spec.xmin ?? -5)
+    const x1 = Number(spec.xmax ?? 5)
+    return { x0, x1: x1 > x0 ? x1 : x0 + 10 }
+  }, [spec])
+
+  const [zoom, setZoom] = useState(1)
+  const [crosshair, setCrosshair] = useState(null) // { x, y, svgX, svgY }
+  const svgRef = useRef(null)
+
   if (!fns.length) return null
-  const x0 = Number(spec.xmin ?? -5), x1 = Number(spec.xmax ?? 5), sx = x1 - x0
-  if (!(sx > 0)) return null
-  const N = 240
+
+  const sxSpan = (baseRange.x1 - baseRange.x0) / zoom
+  const midX = (baseRange.x0 + baseRange.x1) / 2
+  const x0 = midX - sxSpan / 2
+  const x1 = midX + sxSpan / 2
+  const sx = x1 - x0
+
+  const N = 260
   const lines = fns.map((f) => Array.from({ length: N + 1 }, (_, i) => {
     const x = x0 + (sx * i) / N
     let y; try { y = f.fn(x) } catch { y = NaN }
     return [x, Number.isFinite(y) ? y : null]
   }))
-  const pts = (spec.points || []).filter((p) => Number.isFinite(+p.x) && Number.isFinite(+p.y))
-  const ys = [...lines.flat().map((p) => p[1]).filter((v) => v !== null), ...pts.map((p) => +p.y), 0]
+
+  // Auto-calculated key points (roots, y-intercept, extrema) + AI points
+  const autoKeyPoints = useMemo(() => (fns[0]?.fn ? findKeyPoints(fns[0].fn, x0, x1) : []), [fns, x0, x1])
+  const aiPts = (spec.points || []).filter((p) => Number.isFinite(+p.x) && Number.isFinite(+p.y))
+  const allPoints = [...autoKeyPoints, ...aiPts]
+
+  const ys = [...lines.flat().map((p) => p[1]).filter((v) => v !== null), ...allPoints.map((p) => +p.y), 0]
   let y0 = Math.max(Math.min(...ys), -4 * sx), y1 = Math.min(Math.max(...ys), 4 * sx)
   if (y1 - y0 < 1e-6) { y0 -= 1; y1 += 1 }
-  const pd = (y1 - y0) * 0.1; y0 -= pd; y1 += pd
-  const W = 400, H = 260, m = 24
+  const pd = (y1 - y0) * 0.12; y0 -= pd; y1 += pd
+  const W = 420, H = 270, m = 26
   const X = (x) => m + ((x - x0) / sx) * (W - 2 * m), Y = (y) => H - m - ((y - y0) / (y1 - y0)) * (H - 2 * m)
-  const step = (r) => (r <= 10 ? 1 : r <= 20 ? 2 : Math.ceil(r / 10))
+  const step = (r) => (r <= 6 ? 1 : r <= 15 ? 2 : Math.ceil(r / 8))
   const ticks = (a, b) => { const st = step(b - a), out = []; for (let v = Math.ceil(a / st) * st; v <= b; v += st) out.push(v); return out }
+
+  const handlePointerMove = (e) => {
+    const svg = svgRef.current
+    if (!svg) return
+    const rect = svg.getBoundingClientRect()
+    const clientX = e.touches ? e.touches[0].clientX : e.clientX
+    const clientY = e.touches ? e.touches[0].clientY : e.clientY
+    const mouseSvgX = ((clientX - rect.left) / rect.width) * W
+    const mathX = x0 + ((mouseSvgX - m) / (W - 2 * m)) * sx
+    const f0 = fns[0]
+    if (f0?.fn) {
+      try {
+        const mathY = f0.fn(mathX)
+        if (Number.isFinite(mathY)) {
+          setCrosshair({
+            mathX: mathX.toFixed(2),
+            mathY: mathY.toFixed(2),
+            cx: X(mathX),
+            cy: Y(mathY),
+          })
+          return
+        }
+      } catch { /* ignore */ }
+    }
+    setCrosshair(null)
+  }
+
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} className="w-full max-h-80" role="img" aria-label="function graph">
-      {ticks(x0, x1).map((v) => <g key={'x' + v}><line x1={X(v)} x2={X(v)} y1={m / 2} y2={H - m / 2} stroke="currentColor" opacity=".12" /><text x={X(v)} y={Y(0) + 11} fontSize="9" textAnchor="middle" fill="currentColor" opacity=".7">{v !== 0 ? v : ''}</text></g>)}
-      {ticks(y0, y1).map((v) => <g key={'y' + v}><line y1={Y(v)} y2={Y(v)} x1={m / 2} x2={W - m / 2} stroke="currentColor" opacity=".12" /><text y={Y(v) + 3} x={X(0) - 4} fontSize="9" textAnchor="end" fill="currentColor" opacity=".7">{v !== 0 ? v : ''}</text></g>)}
-      <line x1={m / 2} x2={W - m / 2} y1={Y(0)} y2={Y(0)} stroke="currentColor" strokeWidth="1.2" />
-      <line y1={m / 2} y2={H - m / 2} x1={X(0)} x2={X(0)} stroke="currentColor" strokeWidth="1.2" />
-      {lines.map((pl, i) => {
-        let d = '', pen = false
-        pl.forEach(([x, y]) => {
-          if (y === null || y < y0 || y > y1) { pen = false; return }
-          d += `${pen ? 'L' : 'M'}${X(x).toFixed(1)},${Y(y).toFixed(1)} `; pen = true
-        })
-        return <path key={i} d={d} fill="none" stroke={COLORS[i % 3]} strokeWidth="2" strokeLinejoin="round" />
-      })}
-      {fns.map((f, i) => f.label && <text key={i} x={W - m} y={m + i * 13} fontSize="10" textAnchor="end" fill={COLORS[i % 3]}>{f.label}</text>)}
-      {pts.map((p, i) => <g key={i}><circle cx={X(+p.x)} cy={Y(+p.y)} r="3.5" fill={FOCUS} /><text x={X(+p.x) + 6} y={Y(+p.y) - 6} fontSize="10" fontWeight="700" fill={FOCUS}>{p.label}</text></g>)}
-    </svg>
+    <div className="relative rounded-2xl bg-slate-950/80 p-2.5 border border-slate-700">
+      {/* Zoom / Reset Controls */}
+      <div className="absolute right-3 top-3 z-10 flex items-center gap-1">
+        <button type="button" onClick={() => setZoom((z) => Math.min(z * 1.35, 5))}
+          className="grid size-7 place-items-center rounded-lg border border-slate-700 bg-slate-900/90 text-sm font-bold text-slate-200 hover:bg-slate-800"
+          title="Yaqinlashtirish (Zoom In)">＋</button>
+        <button type="button" onClick={() => setZoom((z) => Math.max(z / 1.35, 0.4))}
+          className="grid size-7 place-items-center rounded-lg border border-slate-700 bg-slate-900/90 text-sm font-bold text-slate-200 hover:bg-slate-800"
+          title="Uzoqlashtirish (Zoom Out)">−</button>
+        <button type="button" onClick={() => { setZoom(1); setCrosshair(null) }}
+          className="rounded-lg border border-slate-700 bg-slate-900/90 px-2 py-1 text-[11px] font-bold text-slate-300 hover:bg-slate-800"
+          title="Dastlabki holat">Reset</button>
+      </div>
+
+      <svg
+        ref={svgRef}
+        viewBox={`0 0 ${W} ${H}`}
+        className="w-full max-h-80 cursor-crosshair select-none"
+        role="img"
+        aria-label="Interactive function graph"
+        onMouseMove={handlePointerMove}
+        onMouseLeave={() => setCrosshair(null)}
+        onTouchMove={handlePointerMove}
+        onTouchEnd={() => setCrosshair(null)}
+      >
+        {ticks(x0, x1).map((v) => <g key={'x' + v}><line x1={X(v)} x2={X(v)} y1={m / 2} y2={H - m / 2} stroke="currentColor" opacity=".12" /><text x={X(v)} y={Y(0) + 11} fontSize="9" textAnchor="middle" fill="currentColor" opacity=".7">{v !== 0 ? v : ''}</text></g>)}
+        {ticks(y0, y1).map((v) => <g key={'y' + v}><line y1={Y(v)} y2={Y(v)} x1={m / 2} x2={W - m / 2} stroke="currentColor" opacity=".12" /><text y={Y(v) + 3} x={X(0) - 4} fontSize="9" textAnchor="end" fill="currentColor" opacity=".7">{v !== 0 ? v : ''}</text></g>)}
+        <line x1={m / 2} x2={W - m / 2} y1={Y(0)} y2={Y(0)} stroke="currentColor" strokeWidth="1.2" />
+        <line y1={m / 2} y2={H - m / 2} x1={X(0)} x2={X(0)} stroke="currentColor" strokeWidth="1.2" />
+
+        {lines.map((pl, i) => {
+          let d = '', pen = false
+          pl.forEach(([x, y]) => {
+            if (y === null || y < y0 || y > y1) { pen = false; return }
+            d += `${pen ? 'L' : 'M'}${X(x).toFixed(1)},${Y(y).toFixed(1)} `; pen = true
+          })
+          return <path key={i} d={d} fill="none" stroke={COLORS[i % 3]} strokeWidth="2.5" strokeLinejoin="round" />
+        })}
+
+        {fns.map((f, i) => f.label && <text key={i} x={W - m} y={m + i * 13} fontSize="10" fontWeight="bold" textAnchor="end" fill={COLORS[i % 3]}>{f.label}</text>)}
+
+        {/* Highlighted key points (roots, extrema, intercepts) */}
+        {allPoints.map((p, i) => {
+          const px = X(+p.x), py = Y(+p.y)
+          if (px < m || px > W - m || py < m || py > H - m) return null
+          return (
+            <g key={i}>
+              <circle cx={px} cy={py} r="4.5" fill={FOCUS} stroke="#fff" strokeWidth="1.2" />
+              <text x={px + 6} y={py - 6} fontSize="9" fontWeight="700" fill={FOCUS}>{p.label}</text>
+            </g>
+          )
+        })}
+
+        {/* Interactive crosshair tooltip displaying live (x, y) coordinates */}
+        {crosshair && crosshair.cx >= m && crosshair.cx <= W - m && crosshair.cy >= m && crosshair.cy <= H - m && (
+          <g>
+            <line x1={crosshair.cx} x2={crosshair.cx} y1={m} y2={H - m} stroke="#f59e0b" strokeDasharray="3 3" opacity=".6" />
+            <line x1={m} x2={W - m} y1={crosshair.cy} y2={crosshair.cy} stroke="#f59e0b" strokeDasharray="3 3" opacity=".6" />
+            <circle cx={crosshair.cx} cy={crosshair.cy} r="5" fill="#f59e0b" stroke="#ffffff" strokeWidth="2" />
+            <rect x={Math.min(crosshair.cx + 8, W - 95)} y={Math.max(crosshair.cy - 24, 6)} width="85" height="18" rx="4" fill="rgba(15, 23, 42, 0.9)" stroke="#475569" />
+            <text x={Math.min(crosshair.cx + 50, W - 52)} y={Math.max(crosshair.cy - 11, 19)} fontSize="10" fontWeight="bold" fill="#38bdf8" textAnchor="middle">
+              ({crosshair.mathX}, {crosshair.mathY})
+            </text>
+          </g>
+        )}
+      </svg>
+    </div>
   )
 }
 
 export default function Board({ lang, data, step }) {
   const t = T[lang]
   const s = data.steps?.[step]
-  const showDiagram = data.is_geometry === true && data.geometry_svg_or_coords // hidden for every non-geometry problem
+  const showDiagram = data.is_geometry === true && data.geometry_svg_or_coords
   return (
     <section className="board rounded-2xl p-5 md:p-6 text-slate-100 bg-slate-900 border-4 border-slate-700 shadow-inner" aria-label={t.board}>
       <h3 className="font-bold mb-3 text-slate-300">🧑‍🏫 {t.board}</h3>

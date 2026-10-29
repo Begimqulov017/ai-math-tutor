@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <defs>
+    <linearGradient id="bgGrad512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4f46e5" />
+      <stop offset="50%" stop-color="#6366f1" />
+      <stop offset="100%" stop-color="#7c3aed" />
+    </linearGradient>
+    <linearGradient id="symbolGrad512" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ffffff" />
+      <stop offset="100%" stop-color="#e0e7ff" />
+    </linearGradient>
+    <filter id="glow512" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="12" stdDeviation="16" flood-color="#312e81" flood-opacity="0.4" />
+    </filter>
+  </defs>
+
+  <rect width="512" height="512" rx="116" fill="url(#bgGrad512)" />
+  <rect x="8" y="8" width="496" height="496" rx="108" fill="none" stroke="#ffffff" stroke-width="2" stroke-opacity="0.15" />
+  <circle cx="420" cy="90" r="54" fill="#ffffff" fill-opacity="0.06" />
+  <circle cx="90" cy="420" r="70" fill="#ffffff" fill-opacity="0.04" />
+
+  <g filter="url(#glow512)">
+    <path d="M 148 140
+             L 364 140
+             C 375 140, 384 149, 384 160
+             C 384 168, 379 175, 372 179
+             L 248 256
+             L 372 333
+             C 379 337, 384 344, 384 352
+             C 384 363, 375 372, 364 372
+             L 148 372
+             C 137 372, 128 363, 128 352
+             C 128 341, 137 332, 148 332
+             L 316 332
+             L 214 269
+             C 203 262, 198 259, 198 256
+             C 198 253, 203 250, 214 243
+             L 316 180
+             L 148 180
+             C 137 180, 128 171, 128 160
+             C 128 149, 137 140, 148 140 Z"
+          fill="url(#symbolGrad512)" />
+  </g>
+
+  <path d="M 370 120
+           Q 370 145, 395 145
+           Q 370 145, 370 170
+           Q 370 145, 345 145
+           Q 370 145, 370 120 Z"
+        fill="#38bdf8" />
+</svg>

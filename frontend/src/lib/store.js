@@ -1,4 +1,9 @@
-const K = { history: 'mathtutor.history.v1', mistakes: 'mathtutor.mistakes.v2', auth: 'mathtutor.auth.v2' }
+const K = {
+  history: 'mathtutor.history.v1',
+  mistakes: 'mathtutor.mistakes.v2',
+  auth: 'mathtutor.auth.v2',
+  activeTest: 'mathtutor.active_test.v1',
+}
 const read = (k, d) => { try { return JSON.parse(localStorage.getItem(k)) ?? d } catch { return d } }
 const write = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)) } catch { /* storage full/blocked */ } }
 
@@ -10,6 +15,10 @@ export const loadAuth = () => read(K.auth, null) // { token, user }
 export const saveAuth = (v) => write(K.auth, v)
 export const clearAuth = () => { try { localStorage.removeItem(K.auth) } catch { /* ignore */ } }
 export const clearData = () => { saveHistory([]); saveMistakes([]) }
+
+export const loadActiveTest = () => read(K.activeTest, null)
+export const saveActiveTest = (v) => write(K.activeTest, v)
+export const clearActiveTest = () => { try { localStorage.removeItem(K.activeTest) } catch { /* ignore */ } }
 
 // level n starts at 100*(n-1)^2 XP
 export function levelInfo(xp = 0) {

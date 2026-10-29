@@ -3,9 +3,9 @@ import { T } from '../lib/i18n'
 import { chatApi, createThread, deleteThread, getThread, listThreads, sendThreadMessage } from '../lib/api'
 import { Rich, Tex } from './Tex'
 import { unlockAudio } from '../lib/useVoice'
+import MathKeypad from './MathKeypad'
 
-/** Persistent, topic-aware chat. Logged-in users: threads + messages live in the database and the AI remembers
- *  the topic and the conversation of the open thread. Guests: a temporary chat that is not saved. */
+/** Persistent, topic-aware chat with compact visual math toolbar and LaTeX-rendered messages. */
 export default function ChatSection({ lang, user, data, step, voiceOn, speak, listen, onLogin, onUser }) {
   const t = T[lang]
   const loggedIn = !!user
@@ -17,28 +17,27 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
   const [busy, setBusy] = useState(false)
   const [err, setErr] = useState('')
   const [showList, setShowList] = useState(false)
+  const [showKeypad, setShowKeypad] = useState(false)
   const box = useRef()
-  const skipLoad = useRef(null) // a thread we just created locally has nothing to load yet
+  const inputRef = useRef()
+  const skipLoad = useRef(null)
   const messages = loggedIn ? msgs : guestMsgs
   const context = data ? { problem: data.problem, topic: data.topic, currentStep: step + 1, step: data.steps?.[step] } : {}
   const activeThread = threads.find((x) => x.id === activeId)
 
   const refreshThreads = () => listThreads().then((r) => setThreads(r.threads)).catch(() => {})
 
-  // 1) the user's threads
   useEffect(() => {
     if (!loggedIn) { setThreads([]); setActiveId(null); setMsgs([]); return }
     refreshThreads()
   }, [user?.id]) // eslint-disable-line
 
-  // 2) a (new or reopened) problem selects its own thread
   useEffect(() => {
     if (!loggedIn || !data || data.demo) return
     if (data.thread_id) { setActiveId(data.thread_id); refreshThreads(); return }
     if (data.key) createThread({ problem_key: data.key }).then((r) => { setActiveId(r.thread.id); refreshThreads() }).catch(() => {})
   }, [data?.key, data?.thread_id, user?.id]) // eslint-disable-line
 
-  // 3) the messages of the open thread
   useEffect(() => {
     if (!loggedIn || !activeId) { setMsgs([]); return }
     if (skipLoad.current === activeId) { skipLoad.current = null; return }
@@ -66,6 +65,21 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
     } catch { setErr(t.err) }
   }
 
+  const handleKeypadInsert = (snippet, back = 0) => {
+    const el = inputRef.current
+    const start = el ? el.selectionStart : val.length
+    const end = el ? el.selectionEnd : val.length
+    const nextVal = val.slice(0, start) + snippet + val.slice(end)
+    setVal(nextVal)
+    requestAnimationFrame(() => {
+      if (el) {
+        el.focus()
+        const caret = start + snippet.length - back
+        el.setSelectionRange(caret, caret)
+      }
+    })
+  }
+
   const send = async (text = val) => {
     const content = text.trim()
     if (!content || busy) return
@@ -74,7 +88,7 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
     if (loggedIn) {
       try {
         let id = activeId
-        if (!id) { // first question without a thread: start a free chat
+        if (!id) {
           const r = await createThread({ title: '' })
           id = r.thread.id
           skipLoad.current = id
@@ -83,7 +97,7 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
         setMsgs((m) => [...m, mine])
         const r = await sendThreadMessage(id, { content, lang, context })
         setMsgs((m) => [...m.filter((x) => x.id !== mine.id), r.message, r.reply])
-        if (r.user) onUser?.(r.user) // the token balance changes every 3rd message
+        if (r.user) onUser?.(r.user)
         refreshThreads()
         if (voiceOn) speak(r.reply.content)
       } catch (e) {
@@ -162,10 +176,23 @@ export default function ChatSection({ lang, user, data, step, voiceOn, speak, li
           )}
           {loggedIn && <p className="mt-2 text-xs text-slate-500">⚡ {t.chatCost.replace('{n}', user.chat_until_charge ?? 3)}</p>}
           {err && <p role="alert" className="text-rose-600 text-sm font-bold mt-2">{err}</p>}
-          <div className="mt-3 flex gap-2">
-            <button className="btn-ghost" aria-label={t.mic} title={t.mic} onClick={() => { unlockAudio(); listen((x) => send(x)) }}>🎤</button>
-            <input value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && send()} placeholder={t.ask} aria-label={t.ask}
-              className="flex-1 min-w-0 rounded-xl border border-slate-300 dark:border-slate-700 bg-white dark:bg-slate-900 px-3 py-2" maxLength={2000} />
+
+          {/* Toggleable compact visual math keypad above chat input */}
+          {showKeypad && (
+            <div className="mt-2 mb-1">
+              <MathKeypad lang={lang} compact onInsert={handleKeypadInsert} />
+            </div>
+          )}
+
+          <div className="mt-3 flex gap-2 items-center">
+            <button type="button" className={`btn-ghost !px-2.5 !py-2 ${showKeypad ? '!bg-indigo-600 !text-white' : ''}`}
+              title="Matematik klaviatura" aria-label="Matematik klaviatura" aria-pressed={showKeypad}
+              onClick={() => setShowKeypad(!showKeypad)}>
+              ⌨
+            </button>
+            <button className="btn-ghost !px-2.5 !py-2" aria-label={t.mic} title={t.mic} onClick={() => { unlockAudio(); listen((x) => send(x)) }}>🎤</button>
+            <input ref={inputRef} value={val} onChange={(e) => setVal(e.target.value)} onKeyDown={(e) => e.key === 'Enter' && send()} placeholder={t.ask} aria-label={t.ask}
+              className="field flex-1 min-w-0 !py-2.5" maxLength={2000} />
             <button className="btn" onClick={() => { unlockAudio(); send() }} disabled={busy || !val.trim()}>{t.send}</button>
           </div>
         </div>
