@@ -1,669 +1,448 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import React, { useRef, useState, useCallback, useEffect } from 'react'
+import { motion, AnimatePresence } from 'framer-motion'
 import { T } from '../lib/i18n'
-import { fileToBase64 } from '../lib/api'
-import MathKeypad from './MathKeypad'
+import { Tex } from './Tex'
 
-// ---------------------------------------------------------------------------
-// Visual AST <-> LaTeX Parser & Serializer (Self-contained inside ProblemInput.jsx
-// so no extra file imports can ever fail during git push / Vercel build)
-// ---------------------------------------------------------------------------
+const CATEGORIES = [
+  {
+    id: 'basic',
+    label: 'Asosiy',
+    symbols: [
+      { label: 'x²', insert: '^{2}', offset: 2, wrap: (s) => `${s || 'x'}^{2}`, tooltip: 'Daraja 2' },
+      { label: 'xⁿ', insert: '^{}', offset: 2, wrap: (s) => `${s || 'x'}^{}`, tooltip: 'Daraja' },
+      { label: '√x', insert: '\\sqrt{}', offset: 6, wrap: (s) => `\\sqrt{${s}}`, tooltip: 'Kvadrat ildiz' },
+      { label: 'ⁿ√x', insert: '\\sqrt[]{}', offset: 6, wrap: (s) => `\\sqrt[n]{${s}}`, tooltip: 'n-darajali ildiz' },
+      { label: 'a/b', insert: '\\frac{}{}', offset: 6, wrap: (s) => `\\frac{${s}}{}`, tooltip: 'Kasr' },
+      { label: '±', insert: '\\pm ', offset: 4, tooltip: 'Plyus-minus' },
+      { label: '×', insert: '\\cdot ', offset: 6, tooltip: 'Ko‘paytirish' },
+      { label: '÷', insert: '\\div ', offset: 5, tooltip: 'Bo‘lish' },
+      { label: '≠', insert: '\\neq ', offset: 5, tooltip: 'Teng emas' },
+      { label: '≤', insert: '\\leq ', offset: 5, tooltip: 'Kichik yoki teng' },
+      { label: '≥', insert: '\\geq ', offset: 5, tooltip: 'Katta yoki teng' },
+      { label: 'π', insert: '\\pi ', offset: 4, tooltip: 'Pi soni' },
+    ],
+  },
+  {
+    id: 'algebra',
+    label: 'Algebra',
+    symbols: [
+      { label: 'x', insert: 'x', offset: 1, tooltip: 'Noma‘lum x' },
+      { label: 'y', insert: 'y', offset: 1, tooltip: 'Noma‘lum y' },
+      { label: 'ax²+bx+c=0', insert: 'ax^{2} + bx + c = 0', offset: 0, tooltip: 'Kvadrat tenglama' },
+      { label: '|x|', insert: '|x|', offset: 2, wrap: (s) => `|${s}|`, tooltip: 'Modul' },
+      { label: '( )', insert: '()', offset: 1, wrap: (s) => `(${s})`, tooltip: 'Qavs' },
+      { label: '{ }', insert: '\\{\\}', offset: 2, wrap: (s) => `\\{${s}\\}`, tooltip: 'Figurali qavs' },
+      { label: 'log_a(b)', insert: '\\log_{a}(b)', offset: 6, tooltip: 'Logarifm' },
+      { label: 'ln(x)', insert: '\\ln(x)', offset: 4, wrap: (s) => `\\ln(${s})`, tooltip: 'Natural logarifm' },
+      { label: 'x₁', insert: 'x_{1}', offset: 4, tooltip: 'Indeks' },
+      { label: 'x_n', insert: 'x_{n}', offset: 4, tooltip: 'Indeks n' },
+      { label: '∑', insert: '\\sum_{i=1}^{n} ', offset: 7, tooltip: 'Yig‘indi' },
+      { label: '∏', insert: '\\prod_{i=1}^{n} ', offset: 8, tooltip: 'Ko‘paytma' },
+    ],
+  },
+  {
+    id: 'trig_calc',
+    label: 'Trig & Tahlil',
+    symbols: [
+      { label: 'sin', insert: '\\sin(x)', offset: 5, wrap: (s) => `\\sin(${s})` },
+      { label: 'cos', insert: '\\cos(x)', offset: 5, wrap: (s) => `\\cos(${s})` },
+      { label: 'tan', insert: '\\tan(x)', offset: 5, wrap: (s) => `\\tan(${s})` },
+      { label: 'cot', insert: '\\cot(x)', offset: 5, wrap: (s) => `\\cot(${s})` },
+      { label: 'lim', insert: '\\lim_{x \\to 0} ', offset: 9 },
+      { label: '∫ dx', insert: '\\int f(x) \\, dx', offset: 5 },
+      { label: '∫_a^b', insert: '\\int_{a}^{b} f(x) \\, dx', offset: 7 },
+      { label: 'd/dx', insert: '\\frac{d}{dx}', offset: 12 },
+      { label: 'f′(x)', insert: 'f^{\\prime}(x)', offset: 13 },
+      { label: '∞', insert: '\\infty ', offset: 7 },
+      { label: 'α', insert: '\\alpha ', offset: 7 },
+      { label: 'θ', insert: '\\theta ', offset: 7 },
+    ],
+  },
+]
 
-const SYMBOLS = {
-  '\\pi': 'π',
-  '\\infty': '∞',
-  '\\theta': 'θ',
-  '\\alpha': 'α',
-  '\\beta': 'β',
-  '\\gamma': 'γ',
-  '\\delta': 'δ',
-  '\\ge': '≥',
-  '\\geq': '≥',
-  '\\le': '≤',
-  '\\leq': '≤',
-  '\\ne': '≠',
-  '\\neq': '≠',
-  '\\approx': '≈',
-  '\\pm': '±',
-  '\\cdot': '·',
-  '\\times': '×',
-  '\\div': '÷',
-  '\\angle': '∠',
-  '\\triangle': '△',
-  '^\\circ': '°',
-  '\\circ': '°',
-  '\\int': '∫',
-  '\\sum': '∑',
-  '\\sin': 'sin',
-  '\\cos': 'cos',
-  '\\tan': 'tan',
-  '\\cot': 'cot',
-  '\\log': 'log',
-  '\\ln': 'ln',
-  '\\det': 'det',
-}
+const PRESETS = [
+  { label: '2x² - 5x + 2 = 0', value: '2x^{2} - 5x + 2 = 0', desc: 'Kvadrat tenglama' },
+  { label: '∫ (3x² + 2x - 1) dx', value: '\\int (3x^{2} + 2x - 1) \\, dx', desc: 'Aniqmas integral' },
+  { label: 'lim (sin x)/x, x→0', value: '\\lim_{x \\to 0} \\frac{\\sin(x)}{x}', desc: 'Mashhur limit' },
+  { label: 'log₂(x + 3) = 4', value: '\\log_{2}(x + 3) = 4', desc: 'Logarifmik tenglama' },
+  { label: '√(x + 5) = x - 1', value: '\\sqrt{x + 5} = x - 1', desc: 'Irratsional tenglama' },
+]
 
-function readGroup(s, i) {
-  while (i < s.length && s[i] === ' ') i++
-  if (i >= s.length) return ['', i]
-  if (s[i] !== '{') return [s[i], i + 1]
-  let depth = 0
-  for (let j = i; j < s.length; j++) {
-    if (s[j] === '{') depth++
-    else if (s[j] === '}') {
-      depth--
-      if (depth === 0) return [s.slice(i + 1, j), j + 1]
-    }
-  }
-  return [s.slice(i + 1), s.length]
-}
+export default function ProblemInput({
+  lang = 'uz',
+  value = '',
+  onChange,
+  onSubmit,
+  busy = false,
+  placeholder,
+  onPhotoClick,
+  onVoiceClick,
+  isListening = false,
+}) {
+  const t = T[lang] || T.uz
+  const inputRef = useRef(null)
+  const [activeTab, setActiveTab] = useState('basic')
+  const [showPreview, setShowPreview] = useState(true)
+  const lastSelectionRef = useRef({ start: value.length, end: value.length })
 
-function readBracket(s, i) {
-  while (i < s.length && s[i] === ' ') i++
-  if (i >= s.length || s[i] !== '[') return [null, i]
-  let depth = 0
-  for (let j = i; j < s.length; j++) {
-    if (s[j] === '[') depth++
-    else if (s[j] === ']') {
-      depth--
-      if (depth === 0) return [s.slice(i + 1, j), j + 1]
-    }
-  }
-  return [s.slice(i + 1), s.length]
-}
-
-export function parseLatexToAst(str) {
-  const s = String(str ?? '')
-  const nodes = []
-  let i = 0
-  while (i < s.length) {
-    if (s.startsWith('\\begin{pmatrix}', i) || s.startsWith('\\begin{bmatrix}', i)) {
-      const isB = s.startsWith('\\begin{bmatrix}', i)
-      const endTag = isB ? '\\end{bmatrix}' : '\\end{pmatrix}'
-      const startIdx = i + 15
-      const endIdx = s.indexOf(endTag, startIdx)
-      if (endIdx !== -1) {
-        const inner = s.slice(startIdx, endIdx)
-        const rows = inner.split(/\\\\/).map((r) => r.split('&').map((c) => parseLatexToAst(c.trim())))
-        const cells = [
-          rows[0]?.[0] || [],
-          rows[0]?.[1] || [],
-          rows[1]?.[0] || [],
-          rows[1]?.[1] || [],
-        ]
-        nodes.push({ type: 'matrix', cells })
-        i = endIdx + endTag.length
-        continue
+  // Update saved selection coordinates
+  const updateSelection = useCallback(() => {
+    const el = inputRef.current
+    if (el) {
+      lastSelectionRef.current = {
+        start: el.selectionStart ?? value.length,
+        end: el.selectionEnd ?? value.length,
       }
     }
-    if (s.startsWith('^\\circ', i)) {
-      nodes.push({ type: 'sym', latex: '^\\circ', display: '°' })
-      i += 6
-      continue
-    }
-    if (s[i] === '\\') {
-      const m = s.slice(i).match(/^\\([a-zA-Z]+)/)
-      if (m) {
-        const cmd = '\\' + m[1]
-        const nextIdx = i + m[0].length
-        if (cmd === '\\frac' || cmd === '\\dfrac' || cmd === '\\tfrac') {
-          const [numStr, i1] = readGroup(s, nextIdx)
-          const [denStr, i2] = readGroup(s, i1)
-          nodes.push({ type: 'frac', num: parseLatexToAst(numStr), den: parseLatexToAst(denStr) })
-          i = i2
-          continue
-        }
-        if (cmd === '\\sqrt') {
-          const [degStr, i1] = readBracket(s, nextIdx)
-          const [bodyStr, i2] = readGroup(s, i1)
-          if (degStr !== null) {
-            nodes.push({ type: 'nroot', deg: parseLatexToAst(degStr), body: parseLatexToAst(bodyStr) })
-          } else {
-            nodes.push({ type: 'sqrt', body: parseLatexToAst(bodyStr) })
-          }
-          i = i2
-          continue
-        }
-        if (cmd === '\\text') {
-          const [txt, i1] = readGroup(s, nextIdx)
-          for (const ch of txt) nodes.push({ type: 'char', val: ch })
-          i = i1
-          continue
-        }
-        if (SYMBOLS[cmd]) {
-          const after = s[nextIdx] === ' ' ? nextIdx + 1 : nextIdx
-          nodes.push({ type: 'sym', latex: cmd, display: SYMBOLS[cmd] })
-          i = after
-          continue
+  }, [value.length])
+
+  // Smart insertion keeping focus and exact caret position
+  const insertAtCursor = useCallback(
+    (textToInsert, cursorOffset = null, wrapFn = null) => {
+      const el = inputRef.current
+      if (!el) {
+        onChange?.(value + textToInsert)
+        return
+      }
+
+      const start = el.selectionStart ?? lastSelectionRef.current.start ?? value.length
+      const end = el.selectionEnd ?? lastSelectionRef.current.end ?? value.length
+      const selectedText = value.slice(start, end)
+
+      let finalInsertion = textToInsert
+      let newCursorPos = start + (cursorOffset !== null ? cursorOffset : textToInsert.length)
+
+      // If there is selected text and a wrap function exists
+      if (selectedText.length > 0 && typeof wrapFn === 'function') {
+        finalInsertion = wrapFn(selectedText)
+        newCursorPos = start + finalInsertion.length
+      } else if (textToInsert === '^{}' || textToInsert === '^{2}') {
+        // If cursor right behind variable (e.g. 'x'), automatically attach degree
+        if (textToInsert === '^{}') {
+          newCursorPos = start + 2 // inside braces: ^{|}
+        } else if (textToInsert === '^{2}') {
+          newCursorPos = start + 4 // right after degree: ^{2}|
         }
       }
-      if (s[i + 1] === ',' || s[i + 1] === ';' || s[i + 1] === ' ') {
-        nodes.push({ type: 'char', val: ' ' })
-        i += 2
-        continue
-      }
-    }
-    if (s[i] === '^') {
-      if (s[i + 1] === '\\' && s.slice(i + 1).startsWith('\\circ')) {
-        nodes.push({ type: 'sym', latex: '^\\circ', display: '°' })
-        i += 6
-        continue
-      }
-      const [expStr, i1] = readGroup(s, i + 1)
-      nodes.push({ type: 'sup', exp: parseLatexToAst(expStr) })
-      i = i1
-      continue
-    }
-    if (s[i] === '_') {
-      const [subStr, i1] = readGroup(s, i + 1)
-      nodes.push({ type: 'sub', sub: parseLatexToAst(subStr) })
-      i = i1
-      continue
-    }
-    nodes.push({ type: 'char', val: s[i] })
-    i++
-  }
-  return nodes
-}
 
-export function serializeAstToLatex(nodes) {
-  let out = ''
-  for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i]
-    if (n.type === 'char') {
-      out += n.val
-    } else if (n.type === 'sym') {
-      const next = nodes[i + 1]
-      const needsSpace = /^\\[a-zA-Z]+$/.test(n.latex) && next && next.type === 'char' && /[a-zA-Z0-9]/.test(next.val)
-      out += n.latex + (needsSpace ? ' ' : '')
-    } else if (n.type === 'frac') {
-      out += `\\frac{${serializeAstToLatex(n.num)}}{${serializeAstToLatex(n.den)}}`
-    } else if (n.type === 'sqrt') {
-      out += `\\sqrt{${serializeAstToLatex(n.body)}}`
-    } else if (n.type === 'nroot') {
-      out += `\\sqrt[${serializeAstToLatex(n.deg)}]{${serializeAstToLatex(n.body)}}`
-    } else if (n.type === 'sup') {
-      const inner = serializeAstToLatex(n.exp)
-      out += inner.length === 1 && /[0-9a-zA-Z]/.test(inner) ? `^${inner}` : `^{${inner}}`
-    } else if (n.type === 'sub') {
-      const inner = serializeAstToLatex(n.sub)
-      out += inner.length === 1 && /[0-9a-zA-Z]/.test(inner) ? `_${inner}` : `_{${inner}}`
-    } else if (n.type === 'matrix') {
-      const c = n.cells.map((cell) => serializeAstToLatex(cell) || '0')
-      out += `\\begin{pmatrix}${c[0]}&${c[1]}\\\\${c[2]}&${c[3]}\\end{pmatrix}`
-    }
-  }
-  return out
-}
+      const nextVal = value.slice(0, start) + finalInsertion + value.slice(end)
+      onChange?.(nextVal)
 
-function groupSegments(nodes) {
-  const items = []
-  let textBuf = ''
-  let startIdx = 0
-
-  const flushText = (endIdx) => {
-    if (textBuf.length > 0 || items.length === 0) {
-      items.push({
-        kind: 'text',
-        val: textBuf,
-        sIdx: startIdx,
-        eIdx: endIdx,
+      requestAnimationFrame(() => {
+        el.focus()
+        el.setSelectionRange(newCursorPos, newCursorPos)
+        lastSelectionRef.current = { start: newCursorPos, end: newCursorPos }
       })
-      textBuf = ''
-    }
-  }
+    },
+    [value, onChange]
+  )
 
-  for (let i = 0; i < nodes.length; i++) {
-    const n = nodes[i]
-    if (n.type === 'char') {
-      if (textBuf === '') startIdx = i
-      textBuf += n.val
-    } else if (n.type === 'sym') {
-      if (textBuf === '') startIdx = i
-      textBuf += n.display
+  // Move caret left/right by delta steps
+  const moveCaret = useCallback(
+    (delta) => {
+      const el = inputRef.current
+      if (!el) return
+      const cur = el.selectionStart ?? value.length
+      const next = Math.max(0, Math.min(value.length, cur + delta))
+      el.focus()
+      el.setSelectionRange(next, next)
+      lastSelectionRef.current = { start: next, end: next }
+    },
+    [value.length]
+  )
+
+  // Safe deletion at caret position
+  const handleBackspace = useCallback(() => {
+    const el = inputRef.current
+    if (!el) return
+    const start = el.selectionStart ?? value.length
+    const end = el.selectionEnd ?? value.length
+
+    if (start === 0 && end === 0) return
+
+    let nextVal = ''
+    let newPos = start
+
+    if (start !== end) {
+      nextVal = value.slice(0, start) + value.slice(end)
+      newPos = start
     } else {
-      flushText(i)
-      items.push({ kind: 'node', node: n, idx: i })
-      startIdx = i + 1
+      // Check if deleting brace of ^{...} or special token
+      nextVal = value.slice(0, start - 1) + value.slice(start)
+      newPos = start - 1
     }
-  }
-  flushText(nodes.length)
-  return items
-}
 
-function textToAstNodes(str) {
-  const revSym = {
-    'π': '\\pi',
-    '∞': '\\infty',
-    'θ': '\\theta',
-    'α': '\\alpha',
-    'β': '\\beta',
-    '≥': '\\ge',
-    '≤': '\\le',
-    '≠': '\\ne',
-    '≈': '\\approx',
-    '±': '\\pm',
-    '·': '\\cdot',
-    '×': '\\cdot',
-    '÷': '\\div',
-    '∠': '\\angle',
-    '△': '\\triangle',
-    '°': '^\\circ',
-    '∫': '\\int',
-    '∑': '\\sum',
-  }
-  const out = []
-  for (const ch of str) {
-    if (revSym[ch]) out.push({ type: 'sym', latex: revSym[ch], display: ch })
-    else out.push({ type: 'char', val: ch })
-  }
-  return out
-}
+    onChange?.(nextVal)
+    requestAnimationFrame(() => {
+      el.focus()
+      el.setSelectionRange(newPos, newPos)
+      lastSelectionRef.current = { start: newPos, end: newPos }
+    })
+  }, [value, onChange])
 
-function AutoSizeInput({ value, placeholder, minW, onChangeText, onBackspaceEmpty, onFocus, onSubmit }) {
-  const ref = useRef(null)
-  const widthCh = Math.max((value || placeholder || '').length + 1, 1)
+  // Keyboard navigation & smart bracket jumping (Tab / ArrowRight / Enter)
+  const handleKeyDown = (e) => {
+    const el = inputRef.current
+    if (!el) return
 
-  return (
-    <input
-      ref={ref}
-      type="text"
-      value={value}
-      placeholder={placeholder}
-      style={{ width: `${widthCh}ch` }}
-      onFocus={() => onFocus?.({ el: ref.current })}
-      onChange={(e) => onChangeText(e.target.value, e.target.selectionStart)}
-      onKeyDown={(e) => {
-        if (e.key === 'Enter' && (e.ctrlKey || e.metaKey || !e.shiftKey)) {
-          e.preventDefault()
-          onSubmit?.()
-          return
-        }
-        if (e.key === 'Backspace' && value === '') {
-          e.preventDefault()
-          onBackspaceEmpty?.()
-        }
-      }}
-      className={`${minW} max-w-full bg-transparent px-0.5 py-0.5 font-sans text-lg font-medium text-slate-900 outline-none placeholder:text-slate-400 dark:text-white`}
-    />
-  )
-}
+    const start = el.selectionStart
+    const end = el.selectionEnd
 
-function SlotEditor({ nodes, onChange, onRemoveOut, onSubmit, placeholder = '□', className = '', minW = 'min-w-[1.6rem]', registerActive }) {
-  const segments = groupSegments(nodes)
-
-  const replaceRange = (sIdx, eIdx, newSubNodes) => {
-    const next = [...nodes.slice(0, sIdx), ...newSubNodes, ...nodes.slice(eIdx)]
-    onChange(next)
-  }
-
-  const updateNodeAt = (idx, newNode) => {
-    if (!newNode) {
-      onChange([...nodes.slice(0, idx), ...nodes.slice(idx + 1)])
-    } else {
-      const next = [...nodes]
-      next[idx] = newNode
-      onChange(next)
-    }
-  }
-
-  return (
-    <span className={`inline-flex flex-wrap items-center gap-0.5 align-middle ${className}`}>
-      {segments.map((seg, si) => {
-        if (seg.kind === 'text') {
-          const isOnlyEmpty = segments.length === 1 && seg.val === ''
-          return (
-            <AutoSizeInput
-              key={`txt-${si}-${seg.sIdx}`}
-              value={seg.val}
-              placeholder={isOnlyEmpty ? placeholder : ''}
-              minW={isOnlyEmpty ? minW : 'min-w-[0.4rem]'}
-              onFocus={() => registerActive?.({
-                insertNode: (astNodes, caretPos) => {
-                  const pos = caretPos ?? seg.val.length
-                  const before = textToAstNodes(seg.val.slice(0, pos))
-                  const after = textToAstNodes(seg.val.slice(pos))
-                  replaceRange(seg.sIdx, seg.eIdx, [...before, ...astNodes, ...after])
-                },
-              })}
-              onChangeText={(newVal) => {
-                if (newVal.endsWith('^2')) {
-                  const prefix = newVal.slice(0, -2)
-                  replaceRange(seg.sIdx, seg.eIdx, [...textToAstNodes(prefix), { type: 'sup', exp: [{ type: 'char', val: '2' }] }])
-                  return
-                }
-                if (newVal.endsWith('^3')) {
-                  const prefix = newVal.slice(0, -2)
-                  replaceRange(seg.sIdx, seg.eIdx, [...textToAstNodes(prefix), { type: 'sup', exp: [{ type: 'char', val: '3' }] }])
-                  return
-                }
-                if (newVal.endsWith('^')) {
-                  const prefix = newVal.slice(0, -1)
-                  replaceRange(seg.sIdx, seg.eIdx, [...textToAstNodes(prefix), { type: 'sup', exp: [] }])
-                  return
-                }
-                if (newVal.endsWith('_')) {
-                  const prefix = newVal.slice(0, -1)
-                  replaceRange(seg.sIdx, seg.eIdx, [...textToAstNodes(prefix), { type: 'sub', sub: [] }])
-                  return
-                }
-                replaceRange(seg.sIdx, seg.eIdx, textToAstNodes(newVal))
-              }}
-              onBackspaceEmpty={() => {
-                if (seg.sIdx > 0) {
-                  updateNodeAt(seg.sIdx - 1, null)
-                } else if (nodes.length === 0 && onRemoveOut) {
-                  onRemoveOut()
-                }
-              }}
-              onSubmit={onSubmit}
-            />
-          )
-        }
-
-        const n = seg.node
-        const idx = seg.idx
-
-        if (n.type === 'frac') {
-          return (
-            <span key={`frac-${idx}`} className="mx-1 inline-flex flex-col items-center justify-center align-middle rounded-lg bg-indigo-50/50 px-1.5 py-0.5 dark:bg-indigo-950/40 border border-indigo-200/60 dark:border-indigo-800/50">
-              <span className="border-b-2 border-slate-700 dark:border-slate-200 px-1 pb-0.5 text-center leading-tight">
-                <SlotEditor
-                  nodes={n.num}
-                  placeholder="a"
-                  onChange={(num) => updateNodeAt(idx, { ...n, num })}
-                  onRemoveOut={() => updateNodeAt(idx, null)}
-                  onSubmit={onSubmit}
-                  registerActive={registerActive}
-                />
-              </span>
-              <span className="px-1 pt-0.5 text-center leading-tight">
-                <SlotEditor
-                  nodes={n.den}
-                  placeholder="b"
-                  onChange={(den) => updateNodeAt(idx, { ...n, den })}
-                  onRemoveOut={() => updateNodeAt(idx, null)}
-                  onSubmit={onSubmit}
-                  registerActive={registerActive}
-                />
-              </span>
-            </span>
-          )
-        }
-
-        if (n.type === 'sqrt') {
-          return (
-            <span key={`sqrt-${idx}`} className="mx-0.5 inline-flex items-center align-middle rounded-lg bg-indigo-50/40 px-1 py-0.5 dark:bg-indigo-950/30">
-              <span className="select-none font-serif text-xl font-bold leading-none text-indigo-700 dark:text-indigo-300">√</span>
-              <span className="border-t-2 border-indigo-700 dark:border-indigo-300 px-1 pt-0.5">
-                <SlotEditor
-                  nodes={n.body}
-                  placeholder="x"
-                  onChange={(body) => updateNodeAt(idx, { ...n, body })}
-                  onRemoveOut={() => updateNodeAt(idx, null)}
-                  onSubmit={onSubmit}
-                  registerActive={registerActive}
-                />
-              </span>
-            </span>
-          )
-        }
-
-        if (n.type === 'nroot') {
-          return (
-            <span key={`nroot-${idx}`} className="mx-0.5 inline-flex items-center align-middle rounded-lg bg-indigo-50/40 px-1 py-0.5 dark:bg-indigo-950/30">
-              <sup className="-mr-1 -mt-2 text-xs font-bold text-indigo-700 dark:text-indigo-300">
-                <SlotEditor
-                  nodes={n.deg}
-                  placeholder="n"
-                  minW="min-w-[0.9rem]"
-                  onChange={(deg) => updateNodeAt(idx, { ...n, deg })}
-                  onRemoveOut={() => updateNodeAt(idx, null)}
-                  onSubmit={onSubmit}
-                  registerActive={registerActive}
-                />
-              </sup>
-              <span className="select-none font-serif text-xl font-bold leading-none text-indigo-700 dark:text-indigo-300">√</span>
-              <span className="border-t-2 border-indigo-700 dark:border-indigo-300 px-1 pt-0.5">
-                <SlotEditor
-                  nodes={n.body}
-                  placeholder="x"
-                  onChange={(body) => updateNodeAt(idx, { ...n, body })}
-                  onRemoveOut={() => updateNodeAt(idx, null)}
-                  onSubmit={onSubmit}
-                  registerActive={registerActive}
-                />
-              </span>
-            </span>
-          )
-        }
-
-        if (n.type === 'sup') {
-          return (
-            <sup key={`sup-${idx}`} className="relative -top-2.5 ml-0.5 inline-flex items-center rounded bg-indigo-100/70 px-1 py-0 text-xs font-bold text-indigo-900 dark:bg-indigo-900/60 dark:text-indigo-100">
-              <SlotEditor
-                nodes={n.exp}
-                placeholder="n"
-                minW="min-w-[0.9rem]"
-                onChange={(exp) => updateNodeAt(idx, { ...n, exp })}
-                onRemoveOut={() => updateNodeAt(idx, null)}
-                onSubmit={onSubmit}
-                registerActive={registerActive}
-              />
-            </sup>
-          )
-        }
-
-        if (n.type === 'sub') {
-          return (
-            <sub key={`sub-${idx}`} className="relative -bottom-1.5 ml-0.5 inline-flex items-center rounded bg-slate-200/70 px-1 py-0 text-xs font-bold text-slate-800 dark:bg-slate-800 dark:text-slate-200">
-              <SlotEditor
-                nodes={n.sub}
-                placeholder="n"
-                minW="min-w-[0.9rem]"
-                onChange={(sub) => updateNodeAt(idx, { ...n, sub })}
-                onRemoveOut={() => updateNodeAt(idx, null)}
-                onSubmit={onSubmit}
-                registerActive={registerActive}
-              />
-            </sub>
-          )
-        }
-
-        if (n.type === 'matrix') {
-          return (
-            <span key={`mat-${idx}`} className="mx-1 inline-flex items-center align-middle rounded-xl bg-indigo-50/50 px-1.5 py-1 dark:bg-indigo-950/40">
-              <span className="select-none text-3xl font-light leading-none text-slate-600 dark:text-slate-300">(</span>
-              <span className="mx-1 grid grid-cols-2 gap-1.5">
-                {n.cells.map((cellNodes, ci) => (
-                  <span key={ci} className="rounded border border-slate-300 dark:border-slate-700 bg-white/80 dark:bg-slate-900/80 px-1.5 py-0.5 text-center">
-                    <SlotEditor
-                      nodes={cellNodes}
-                      placeholder="0"
-                      minW="min-w-[1.2rem]"
-                      onChange={(updatedCell) => {
-                        const nextCells = [...n.cells]
-                        nextCells[ci] = updatedCell
-                        updateNodeAt(idx, { ...n, cells: nextCells })
-                      }}
-                      onRemoveOut={() => updateNodeAt(idx, null)}
-                      onSubmit={onSubmit}
-                      registerActive={registerActive}
-                    />
-                  </span>
-                ))}
-              </span>
-              <span className="select-none text-3xl font-light leading-none text-slate-600 dark:text-slate-300">)</span>
-            </span>
-          )
-        }
-
-        return null
-      })}
-    </span>
-  )
-}
-
-export function LiveMathField({ value, onChange, onSubmit, placeholder, ariaLabel, editorRef }) {
-  const [nodes, setNodes] = useState(() => parseLatexToAst(value))
-  const lastSerialized = useRef(value)
-  const activeSlotRef = useRef(null)
-  const containerRef = useRef(null)
-  const id = useId()
-
-  useEffect(() => {
-    if (value !== lastSerialized.current) {
-      lastSerialized.current = value
-      setNodes(parseLatexToAst(value))
-    }
-  }, [value])
-
-  const updateAst = (nextNodes) => {
-    setNodes(nextNodes)
-    const latex = serializeAstToLatex(nextNodes)
-    lastSerialized.current = latex
-    onChange(latex)
-  }
-
-  useEffect(() => {
-    if (!editorRef) return
-    editorRef.current = {
-      insert: (snippet) => {
-        let newAstNodes = []
-        if (snippet === '\\sqrt{}') {
-          newAstNodes = [{ type: 'sqrt', body: [] }]
-        } else if (snippet === '\\sqrt[]{}') {
-          newAstNodes = [{ type: 'nroot', deg: [], body: [] }]
-        } else if (snippet === '^2') {
-          newAstNodes = [{ type: 'sup', exp: [{ type: 'char', val: '2' }] }]
-        } else if (snippet === '^{}') {
-          newAstNodes = [{ type: 'sup', exp: [] }]
-        } else if (snippet === '_{}') {
-          newAstNodes = [{ type: 'sub', sub: [] }]
-        } else if (snippet === '\\frac{}{}') {
-          newAstNodes = [{ type: 'frac', num: [], den: [] }]
-        } else if (snippet.startsWith('\\begin{pmatrix}')) {
-          newAstNodes = [{ type: 'matrix', cells: [[], [], [], []] }]
-        } else {
-          newAstNodes = parseLatexToAst(snippet)
-        }
-
-        if (activeSlotRef.current?.insertNode) {
-          activeSlotRef.current.insertNode(newAstNodes)
-        } else {
-          updateAst([...nodes, ...newAstNodes])
-        }
-      },
-      focus: () => {
-        const inputs = containerRef.current?.querySelectorAll('input')
-        if (inputs?.length) inputs[inputs.length - 1].focus()
-      },
-    }
-  })
-
-  return (
-    <math-field
-      id={id}
-      ref={containerRef}
-      role="textbox"
-      aria-label={ariaLabel || placeholder}
-      onClick={(e) => {
-        if (e.target === containerRef.current) {
-          const inputs = containerRef.current.querySelectorAll('input')
-          if (inputs.length) inputs[inputs.length - 1].focus()
-        }
-      }}
-      className="field flex min-h-[4.25rem] flex-1 cursor-text flex-wrap items-center gap-1 rounded-2xl border-2 border-indigo-200/90 bg-white/95 px-4 py-3 text-lg shadow-inner transition focus-within:border-indigo-500 focus-within:ring-4 focus-within:ring-indigo-500/20 dark:border-slate-700 dark:bg-slate-900/90"
-    >
-      <SlotEditor
-        nodes={nodes}
-        placeholder={placeholder}
-        minW="min-w-[14rem] flex-1"
-        onChange={updateAst}
-        onSubmit={onSubmit}
-        registerActive={(slotApi) => { activeSlotRef.current = slotApi }}
-      />
-    </math-field>
-  )
-}
-
-const CHIP_PROBLEMS = ['x^2 - 5x + 6 = 0', "f(x) = x^3 - 3x^2 + 2x, f'(x)", '\\frac{2}{3} + \\frac{3}{4}', '\\sin^2 x + \\cos^2 x']
-
-export default function ProblemInput({ lang, text, setText, onSubmit, loading }) {
-  const t = T[lang]
-  const [img, setImg] = useState(null)
-  const fileRef = useRef()
-  const editorRef = useRef()
-
-  const pick = async (e) => {
-    const f = e.target.files?.[0]
-    if (f) setImg({ name: f.name, mime: f.type, data: await fileToBase64(f) })
-  }
-
-  const handlePaste = async (e) => {
-    const items = e.clipboardData?.items
-    if (!items) return
-    for (const item of items) {
-      if (item.type?.startsWith("image/")) {
+    // Pressing 'Tab' or 'ArrowRight' when right before a closing brace '}' jumps over it
+    if ((e.key === 'Tab' || e.key === 'ArrowRight') && start === end) {
+      if (value[start] === '}' || value[start] === ')') {
         e.preventDefault()
-        const f = item.getAsFile()
-        if (f) setImg({ name: f.name || "clipboard.png", mime: f.type || "image/png", data: await fileToBase64(f) })
+        const nextPos = start + 1
+        el.setSelectionRange(nextPos, nextPos)
+        lastSelectionRef.current = { start: nextPos, end: nextPos }
         return
       }
     }
-  }
 
-  const insert = (snippet, back = 0) => {
-    if (editorRef.current?.insert) {
-      editorRef.current.insert(snippet, back)
-      return
+    // Enter submits the form without adding newline (unless Shift is held)
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault()
+      if (value.trim() && !busy) {
+        onSubmit?.(value.trim())
+      }
     }
-    setText((prev) => prev + snippet)
   }
-
-  const go = () => { if (!loading && (text.trim() || img)) onSubmit(img) }
 
   return (
-    <section className="space-y-6 pb-2">
-      <div className="space-y-4 pt-8 text-center md:pt-12">
-        <span className="chip !px-4 !py-1.5 !text-sm">✨ {t.heroKicker}</span>
-        <h1 className="font-display text-4xl font-extrabold leading-[1.05] text-ink md:text-6xl dark:text-white">
-          {t.heroTitle1} <span className="gradient-text">{t.heroTitle2}</span>
-        </h1>
-        <p className="mx-auto max-w-2xl text-lg text-slate-600 dark:text-slate-300">{t.heroSub}</p>
-        <div className="flex flex-wrap justify-center gap-2">
-          {[t.heroP1, t.heroP2, t.heroP3, t.heroP4].map((p) => (
-            <span key={p} className="rounded-full border border-slate-200/80 bg-white/70 px-3.5 py-1.5 text-sm font-semibold text-slate-700 dark:border-white/10 dark:bg-white/5 dark:text-slate-200">{p}</span>
-          ))}
-        </div>
-      </div>
+    <div className="w-full space-y-3">
+      {/* Main Container */}
+      <div className="glass relative rounded-3xl border border-indigo-100/80 bg-white/90 p-4 shadow-xl backdrop-blur-md transition-all duration-300 dark:border-slate-800/80 dark:bg-slate-900/90 sm:p-5">
+        {/* Header Tools */}
+        <div className="mb-2.5 flex items-center justify-between text-xs text-slate-500 dark:text-slate-400">
+          <span className="flex items-center gap-1.5 font-bold uppercase tracking-wider text-indigo-600 dark:text-indigo-400">
+            <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.2}>
+              <path strokeLinecap="round" strokeLinejoin="round" d="M9 7h6m0 10v-3m-3 3h.01M9 17h.01M9 14h.01M12 14h.01M15 11h.01M12 11h.01M9 11h.01M7 21h10a2 2 0 002-2V5a2 2 0 00-2-2H7a2 2 0 00-2 2v14a2 2 0 002 2z" />
+            </svg>
+            Matematik Formula
+          </span>
 
-      <div className="glass space-y-4 p-5 md:p-8" onPaste={handlePaste}>
-        <MathKeypad lang={lang} onInsert={insert} />
-        <div className="flex flex-col gap-3 md:flex-row">
-          <LiveMathField
-            editorRef={editorRef}
-            value={text}
-            onChange={setText}
-            onSubmit={go}
-            placeholder={t.ph}
-            ariaLabel={t.ph}
-          />
-          <div className="flex gap-2 md:w-48 md:flex-col">
-            <button className="btn flex-1 !py-3 text-base" disabled={loading || (!text.trim() && !img)} onClick={go}>{loading ? t.analyzing : t.solve}</button>
-            <div className="flex gap-1.5">
-              <button className="btn-ghost flex-1" onClick={() => fileRef.current.click()} title="Ctrl+V / Rasm yuklash">📷 {img ? img.name.slice(0, 12) : t.upload}</button>
-              {img && <button type="button" className="btn-ghost !px-2.5 text-rose-600" onClick={() => setImg(null)} aria-label="Remove image">✕</button>}
-            </div>
-            <input ref={fileRef} type="file" accept="image/*" hidden onChange={pick} />
+          <div className="flex items-center gap-2">
+            {value.trim() && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => setShowPreview((p) => !p)}
+                className="rounded-lg px-2 py-1 font-medium transition hover:bg-slate-100 dark:hover:bg-slate-800"
+              >
+                {showPreview ? 'Prevyuni yopish' : 'Prevyuni ko‘rish'}
+              </button>
+            )}
+            {value && (
+              <button
+                type="button"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => {
+                  onChange?.('')
+                  inputRef.current?.focus()
+                }}
+                className="rounded-lg px-2 py-1 font-medium text-rose-500 transition hover:bg-rose-50 dark:hover:bg-rose-950/40"
+              >
+                Tozalash
+              </button>
+            )}
           </div>
         </div>
-        <div className="flex flex-wrap items-center gap-2">
-          {t.chips.map((c, i) => (
-            <button key={c} className="btn-ghost !px-3.5 !py-1.5 text-sm" onClick={() => setText(CHIP_PROBLEMS[i])}>{c}</button>
+
+        {/* Text Input Area */}
+        <div className="relative">
+          <textarea
+            ref={inputRef}
+            value={value}
+            onChange={(e) => {
+              onChange?.(e.target.value)
+              updateSelection()
+            }}
+            onSelect={updateSelection}
+            onClick={updateSelection}
+            onKeyUp={updateSelection}
+            onKeyDown={handleKeyDown}
+            disabled={busy}
+            rows={3}
+            placeholder={placeholder || t.mathPlaceholder || 'Masalan: 2x^2 - 5x + 2 = 0 yoki \\frac{a}{b}...'}
+            className="w-full resize-none rounded-2xl border border-slate-200 bg-slate-50/70 p-3.5 font-mono text-base text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-indigo-500 focus:bg-white focus:ring-4 focus:ring-indigo-500/15 dark:border-slate-800 dark:bg-slate-950/50 dark:text-slate-100 dark:focus:border-indigo-400 dark:focus:bg-slate-950 sm:text-lg"
+            aria-label="Matematika masalasi yoki formulasi"
+          />
+        </div>
+
+        {/* Live LaTeX Preview */}
+        <AnimatePresence>
+          {showPreview && value.trim() && (
+            <motion.div
+              initial={{ opacity: 0, height: 0 }}
+              animate={{ opacity: 1, height: 'auto' }}
+              exit={{ opacity: 0, height: 0 }}
+              className="mt-3 overflow-hidden rounded-2xl border border-indigo-100 bg-indigo-50/50 p-3.5 dark:border-indigo-950/60 dark:bg-indigo-950/20"
+            >
+              <div className="mb-1 flex items-center justify-between text-xs font-semibold text-indigo-700 dark:text-indigo-300">
+                <span>Jonli matematik ko‘rinish:</span>
+                <span className="text-[11px] font-normal opacity-75">LaTeX format</span>
+              </div>
+              <div className="overflow-x-auto py-1 text-center text-lg sm:text-xl text-slate-900 dark:text-slate-100">
+                <Tex tex={value} block />
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
+
+        {/* Mathematical Virtual Keypad & Caret Controls */}
+        <div className="mt-4 border-t border-slate-100 pt-3 dark:border-slate-800/80">
+          {/* Tabs & Caret Controls Row */}
+          <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
+            {/* Category Tabs */}
+            <div className="flex items-center gap-1 overflow-x-auto rounded-xl bg-slate-100 p-1 dark:bg-slate-800/80 no-scrollbar">
+              {CATEGORIES.map((cat) => (
+                <button
+                  key={cat.id}
+                  type="button"
+                  onMouseDown={(e) => e.preventDefault()}
+                  onClick={() => setActiveTab(cat.id)}
+                  className={`rounded-lg px-2.5 py-1 text-xs font-semibold transition ${
+                    activeTab === cat.id
+                      ? 'bg-white text-indigo-600 shadow-sm dark:bg-slate-900 dark:text-indigo-400'
+                      : 'text-slate-600 hover:text-slate-900 dark:text-slate-400 dark:hover:text-slate-200'
+                  }`}
+                >
+                  {cat.label}
+                </button>
+              ))}
+            </div>
+
+            {/* Caret D-Pad Controls for fine positioning */}
+            <div className="flex items-center gap-1">
+              <button
+                type="button"
+                title="Kursorni chapga surish"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => moveCaret(-1)}
+                className="flex h-8 items-center justify-center rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-bold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:bg-indigo-50 active:scale-95 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                ◀ Chapga
+              </button>
+              <button
+                type="button"
+                title="Kursorni o‘ngga surish"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => moveCaret(1)}
+                className="flex h-8 items-center justify-center rounded-lg border border-slate-200 bg-white px-2.5 text-xs font-bold text-slate-700 shadow-sm transition hover:border-indigo-300 hover:bg-indigo-50 active:scale-95 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-200 dark:hover:bg-slate-700"
+              >
+                O‘ngga ▶
+              </button>
+              <button
+                type="button"
+                title="Belgini o‘chirish"
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={handleBackspace}
+                className="flex h-8 items-center justify-center rounded-lg border border-rose-200 bg-rose-50 px-2.5 text-xs font-bold text-rose-700 shadow-sm transition hover:bg-rose-100 active:scale-95 dark:border-rose-900/50 dark:bg-rose-950/40 dark:text-rose-300 dark:hover:bg-rose-900/60"
+              >
+                ⌫
+              </button>
+            </div>
+          </div>
+
+          {/* Symbols Grid */}
+          <div className="grid grid-cols-4 gap-1.5 sm:grid-cols-6 md:grid-cols-12">
+            {CATEGORIES.find((c) => c.id === activeTab)?.symbols.map((item, idx) => (
+              <button
+                key={idx}
+                type="button"
+                title={item.tooltip || item.label}
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => insertAtCursor(item.insert, item.offset, item.wrap)}
+                className="group relative flex h-9 items-center justify-center rounded-xl border border-slate-200/90 bg-white/80 font-mono text-sm font-semibold text-slate-800 shadow-sm transition hover:-translate-y-0.5 hover:border-indigo-400 hover:bg-indigo-50/70 hover:text-indigo-600 active:translate-y-0 dark:border-slate-800 dark:bg-slate-800/80 dark:text-slate-200 dark:hover:border-indigo-500 dark:hover:bg-slate-700 dark:hover:text-indigo-400"
+              >
+                {item.label}
+              </button>
+            ))}
+          </div>
+        </div>
+
+        {/* Preset equations */}
+        <div className="mt-3 flex items-center gap-1.5 overflow-x-auto py-1 text-xs no-scrollbar">
+          <span className="shrink-0 font-medium text-slate-400 dark:text-slate-500">Misollar:</span>
+          {PRESETS.map((p, i) => (
+            <button
+              key={i}
+              type="button"
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={() => {
+                onChange?.(p.value)
+                requestAnimationFrame(() => {
+                  inputRef.current?.focus()
+                  inputRef.current?.setSelectionRange(p.value.length, p.value.length)
+                  lastSelectionRef.current = { start: p.value.length, end: p.value.length }
+                })
+              }}
+              className="shrink-0 rounded-lg border border-slate-200/80 bg-white/70 px-2.5 py-1 text-slate-600 transition hover:border-indigo-300 hover:bg-indigo-50 hover:text-indigo-600 dark:border-slate-800 dark:bg-slate-800/50 dark:text-slate-300 dark:hover:bg-slate-700/80"
+            >
+              {p.label}
+            </button>
           ))}
-          <span className="ml-auto text-xs text-slate-500">{t.sendHint}</span>
+        </div>
+
+        {/* Action Controls Footer */}
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 pt-3 dark:border-slate-800/80">
+          <div className="flex items-center gap-2">
+            {onPhotoClick && (
+              <button
+                type="button"
+                onClick={onPhotoClick}
+                disabled={busy}
+                className="btn-ghost flex items-center gap-1.5 text-xs sm:text-sm text-slate-600 dark:text-slate-300"
+                title="Rasm yoki formulani skanerlash"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M3 9a2 2 0 012-2h.93a2 2 0 001.664-.89l.812-1.22A2 2 0 0110.07 4h3.86a2 2 0 011.664.89l.812 1.22A2 2 0 0018.07 7H19a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V9z" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M15 13a3 3 0 11-6 0 3 3 0 016 0z" />
+                </svg>
+                <span>Foto/Chizma</span>
+              </button>
+            )}
+
+            {onVoiceClick && (
+              <button
+                type="button"
+                onClick={onVoiceClick}
+                disabled={busy}
+                className={`btn-ghost flex items-center gap-1.5 text-xs sm:text-sm transition ${isListening ? 'text-rose-600 animate-pulse bg-rose-50 dark:bg-rose-950/40' : 'text-slate-600 dark:text-slate-300'}`}
+                title="Ovoz orqali aytish"
+              >
+                <svg className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 11a7 7 0 01-7 7m0 0a7 7 0 01-7-7m7 7v4m0 0H8m4 0h4m-4-8a3 3 0 01-3-3V5a3 3 0 116 0v6a3 3 0 01-3 3z" />
+                </svg>
+                <span>{isListening ? 'Eshitmoqda...' : 'Ovozli'}</span>
+              </button>
+            )}
+          </div>
+
+          <div className="flex items-center gap-2">
+            <button
+              type="button"
+              disabled={!value.trim() || busy}
+              onClick={() => onSubmit?.(value.trim())}
+              className="btn flex items-center gap-2 !px-6 !py-2.5 text-sm font-bold shadow-lg shadow-indigo-500/25"
+            >
+              {busy ? (
+                <>
+                  <span className="h-4 w-4 animate-spin rounded-full border-2 border-white border-t-transparent" />
+                  <span>Tahlil qilinmoqda...</span>
+                </>
+              ) : (
+                <>
+                  <span>Yechish</span>
+                  <svg className="h-4 w-4 transition group-hover:translate-x-0.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2.5}>
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M13 7l5 5m0 0l-5 5m5-5H6" />
+                  </svg>
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
-    </section>
+    </div>
   )
 }
